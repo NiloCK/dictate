@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# dictation_daemon.py
+
 import sys
 import whisper
 import sounddevice as sd
@@ -14,6 +16,10 @@ import os
 import signal
 import tempfile
 import json
+import socket
+import threading
+
+SOCKET_PATH = '/tmp/dictation.sock'
 
 # Global flag for recording state
 RECORDING_STATE_FILE = os.path.join(tempfile.gettempdir(), 'dictation_state.json')
@@ -55,6 +61,23 @@ class DictationSystem:
         self.audio_queue = queue.Queue()
         self.sample_rate = 16000
         self.dtype = np.float32
+        self.recording_thread = None
+
+    def handle_command(self, command):
+        if command == "START":
+            if not self.recording:
+                self.recording_thread = threading.Thread(target=self.start_recording)
+                self.recording_thread.start()
+                return "Recording started"
+        elif command == "STOP":
+            if self.recording:
+                self.recording = False
+                if self.recording_thread:
+                    self.recording_thread.join()
+                text = self.stop_recording()
+                self.type_text(text)
+                return "Recording stopped and processed"
+        return "Command processed"
 
     def callback(self, indata, frames, time, status):
         if status:
@@ -115,32 +138,60 @@ class DictationSystem:
 
             os.system(f'notify-send "Dictation" "Transcribed: {text[:50]}..." -t 2000')
 
-
-def start_dictation():
-    set_state(True)
-    parser = argparse.ArgumentParser(description="Whisper-based dictation system")
-    parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large"],
-                      help="Whisper model to use")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
-                      help="Device to run the model on (cuda/cpu)")
-    args = parser.parse_args()
-
+def run_service():
+    # Remove socket if it exists
     try:
-        dictation = DictationSystem(args.model, args.device)
-        dictation.start_recording()
-        text = dictation.stop_recording()
-        if text:
-            dictation.type_text(text)
-    except Exception as e:
-        os.system(f'notify-send "Dictation Error" "{str(e)}" -t 2000')
-        print(f"\nError: {str(e)}")
-        sys.exit(1)
+        os.unlink(SOCKET_PATH)
+    except OSError:
+        pass
 
-def stop_dictation():
-    set_state(False)
+    # Create Unix domain socket
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(SOCKET_PATH)
+    os.chmod(SOCKET_PATH, 0o666)  # Allow all users to send commands
+    server.listen(1)
+
+    dictation = DictationSystem()
+
+    print("Dictation service started, waiting for commands...")
+
+    while True:
+        conn, addr = server.accept()
+        try:
+            command = conn.recv(1024).decode('utf-8').strip()
+            response = dictation.handle_command(command)
+            conn.send(response.encode('utf-8'))
+        finally:
+            conn.close()
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--stop":
-        stop_dictation()
-    else:
-        start_dictation()
+    run_service()
+
+# def start_dictation():
+#     set_state(True)
+#     parser = argparse.ArgumentParser(description="Whisper-based dictation system")
+#     parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large"],
+#                       help="Whisper model to use")
+#     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
+#                       help="Device to run the model on (cuda/cpu)")
+#     args = parser.parse_args()
+
+#     try:
+#         dictation = DictationSystem(args.model, args.device)
+#         dictation.start_recording()
+#         text = dictation.stop_recording()
+#         if text:
+#             dictation.type_text(text)
+#     except Exception as e:
+#         os.system(f'notify-send "Dictation Error" "{str(e)}" -t 2000')
+#         print(f"\nError: {str(e)}")
+#         sys.exit(1)
+
+# def stop_dictation():
+#     set_state(False)
+
+# if __name__ == "__main__":
+#     if len(sys.argv) > 1 and sys.argv[1] == "--stop":
+#         stop_dictation()
+#     else:
+#         start_dictation()
