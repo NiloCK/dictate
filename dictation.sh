@@ -1,10 +1,28 @@
 #!/bin/bash
 
-# Create a notification that recording is starting
-notify-send "Dictation" "Starting recording..." -t 1000
+# Function to check if dictation is running
+is_running() {
+    if pgrep -f "dictation_script.py" > /dev/null; then
+        return 0  # True in bash
+    else
+        return 1  # False in bash
+    fi
+}
 
-# Run the Python script
-python3 /path/to/dictation_script.py --model base
+# Check if the script is already running
+if is_running; then
+    # Stop dictation
+    python3 /home/colin/dev/dictate/dictation_script.py --stop
 
-# Create a notification that recording has stopped
-notify-send "Dictation" "Transcription complete" -t 1000
+    # Give it a moment to process
+    sleep 2
+
+    # If it's still running, force kill it
+    if is_running; then
+        pkill -f "dictation_script.py"
+        notify-send "Dictation" "Forced to stop" -t 1000
+    fi
+else
+    # Start dictation
+    python3 /home/colin/dev/dictate/dictation_script.py --model base &
+fi
