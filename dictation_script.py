@@ -10,19 +10,31 @@ import queue
 import argparse
 from tempfile import NamedTemporaryFile
 import torch
+import os
+
+def download_model(model_name):
+    """Download the model before starting the system"""
+    print(f"Downloading/Loading the {model_name} model...")
+    try:
+        model = whisper.load_model(model_name)
+        print("Model ready!")
+        return model
+    except KeyboardInterrupt:
+        print("\nModel download interrupted. Please try again.")
+        sys.exit(1)
 
 class DictationSystem:
     def __init__(self, model_name="base", device=None):
         # Initialize Whisper model
-        self.model = whisper.load_model(model_name, device=device)
+        self.model = download_model(model_name)
         self.keyboard = Controller()
         self.recording = False
         self.audio_queue = queue.Queue()
-        
+
         # Audio parameters
         self.sample_rate = 16000
         self.dtype = np.float32
-        
+
     def callback(self, indata, frames, time, status):
         """Callback for sounddevice to capture audio"""
         if status:
@@ -34,7 +46,8 @@ class DictationSystem:
         """Start recording audio"""
         self.recording = True
         self.audio_data = []
-        
+        print("Recording... Press Ctrl+C to stop and transcribe.")
+
         # Start the audio stream
         with sd.InputStream(callback=self.callback,
                           channels=1,
@@ -52,10 +65,11 @@ class DictationSystem:
         self.recording = False
         if not self.audio_data:
             return ""
-            
+
+        print("\nProcessing audio...")
         # Combine all audio chunks
         audio = np.concatenate(self.audio_data, axis=0)
-        
+
         # Use Whisper to transcribe
         result = self.model.transcribe(audio.flatten(), language="en")
         return result["text"].strip()
@@ -73,16 +87,17 @@ def main():
                       help="Device to run the model on (cuda/cpu)")
     args = parser.parse_args()
 
-    print(f"Initializing dictation system with {args.model} model on {args.device}")
-    dictation = DictationSystem(args.model, args.device)
-    
-    print("Press Ctrl+C to stop recording and transcribe")
     try:
+        dictation = DictationSystem(args.model, args.device)
         dictation.start_recording()
     except KeyboardInterrupt:
+        print("\nStopping recording...")
         text = dictation.stop_recording()
         print("\nTranscribed text:", text)
         dictation.type_text(text)
+    except Exception as e:
+        print(f"\nError: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
