@@ -5,7 +5,7 @@ import sounddevice as sd
 import numpy as np
 import threading
 import time
-from pynput.keyboard import Controller
+from pynput.keyboard import Controller, Key
 import queue
 import argparse
 from tempfile import NamedTemporaryFile
@@ -24,6 +24,13 @@ def get_state():
             return json.load(f)
     except:
         return {"recording": False}
+
+def get_display_server():
+    """Detect whether running on Wayland or X11"""
+    session_type = os.environ.get('XDG_SESSION_TYPE', '').lower()
+    if session_type == 'wayland':
+        return 'wayland'
+    return 'x11'
 
 def set_state(recording):
     with open(RECORDING_STATE_FILE, 'w') as f:
@@ -90,10 +97,24 @@ class DictationSystem:
         return result["text"].strip()
 
     def type_text(self, text):
-        """Type the transcribed text"""
+        """Type the transcribed text using appropriate tool"""
         if text:
-            self.keyboard.type(text + " ")
+            display_server = get_display_server()
+            if display_server == 'wayland':
+                try:
+                    # Using ydotool to type text
+                    os.system(f'ydotool type "{text} "')
+                    os.system(f'notify-send "Dictation" "Transcribed: {text[:50]}..." -t 2000')
+                except Exception as e:
+                    print(f"Error typing text: {e}")
+                    os.system(f'notify-send "Dictation Error" "{str(e)}" -t 2000')
+
+            else:
+                # Use xdotool for X11
+                os.system(f'xdotool type "{text} "')
+
             os.system(f'notify-send "Dictation" "Transcribed: {text[:50]}..." -t 2000')
+
 
 def start_dictation():
     set_state(True)
