@@ -21,7 +21,7 @@ VENV_PATH="/opt/dictation_venv"
 python3 -m venv "$VENV_PATH"
 
 # Install required python packages
-"$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch
+"$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch scipy
 
 
 # install required linux tools ... ydotool, ... ? (todo)
