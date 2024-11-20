@@ -7,77 +7,74 @@ import sounddevice as sd
 import numpy as np
 import threading
 import time
-from pynput.keyboard import Controller, Key
 import queue
-import argparse
-from tempfile import NamedTemporaryFile
 import torch
 import os
-import signal
-import tempfile
-import json
 import socket
 import threading
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/tmp/dictation_daemon.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 SOCKET_PATH = '/tmp/dictation.sock'
 
-# Global flag for recording state
-RECORDING_STATE_FILE = os.path.join(tempfile.gettempdir(), 'dictation_state.json')
-
-def get_state():
-    try:
-        with open(RECORDING_STATE_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {"recording": False}
-
-def get_display_server():
-    """Detect whether running on Wayland or X11"""
-    session_type = os.environ.get('XDG_SESSION_TYPE', '').lower()
-    if session_type == 'wayland':
-        return 'wayland'
-    return 'x11'
-
-def set_state(recording):
-    with open(RECORDING_STATE_FILE, 'w') as f:
-        json.dump({"recording": recording}, f)
-
 def download_model(model_name):
     """Download the model before starting the system"""
-    print(f"Downloading/Loading the {model_name} model...")
+    logging.info(f"Downloading model: {model_name}")
+    whisper_cache = os.path.join('/var/cache', 'whisper')
+
+    # Ensure cache directory exists
+    os.makedirs(whisper_cache, exist_ok=True)
+
     try:
-        model = whisper.load_model(model_name)
-        print("Model ready!")
+        model = whisper.load_model(model_name, download_root=whisper_cache)
+        logging.info("Model loaded successfully!")
         return model
+    except RuntimeError as e:
+        logging.error(f"Error loading model: {e}")
+        logging.info("Attempting to download model...")
+        # maybe: add explicit download code here
+        raise
     except KeyboardInterrupt:
-        print("\nModel download interrupted. Please try again.")
+        logging.info("\nModel download interrupted. Please try again.")
         sys.exit(1)
+    except Exception as e:
+        logging.error(f"Unexpected error downloading model: {e}", exc_info=True)
+        raise
 
 class DictationSystem:
     def __init__(self, model_name="base", device=None):
+        logging.info(f"Initializing DictationSystem")
+
         self.model = download_model(model_name)
-        self.keyboard = Controller()
         self.recording = False
         self.audio_queue = queue.Queue()
         self.sample_rate = 16000
         self.dtype = np.float32
         self.recording_thread = None
 
-    def handle_command(self, command):
-        if command == "START":
-            if not self.recording:
-                self.recording_thread = threading.Thread(target=self.start_recording)
-                self.recording_thread.start()
-                return "Recording started"
-        elif command == "STOP":
-            if self.recording:
-                self.recording = False
-                if self.recording_thread:
-                    self.recording_thread.join()
-                text = self.stop_recording()
-                self.type_text(text)
-                return "Recording stopped and processed"
-        return "Command processed"
+    def handle_toggle(self):
+        logging.info("Received TOGGLE command")
+        if not self.recording:
+            self.recording_thread = threading.Thread(target=self.start_recording)
+            self.recording_thread.start()
+            return "Recording started"
+        else:
+            self.recording = False
+            if self.recording_thread:
+                self.recording_thread.join()
+            text = self.stop_recording()
+            self.type_text(text)
+            self.audio_data = []  # Clear the audio data after processing
+            self.audio_queue.queue.clear()  # Clear the queue
+            return f'Processed: "{text}"'
 
     def callback(self, indata, frames, time, status):
         if status:
@@ -87,16 +84,16 @@ class DictationSystem:
 
     def start_recording(self):
         """Start recording audio"""
+        logging.info("Recording audio...")
         self.recording = True
         self.audio_data = []
-        set_state(True)
-        os.system('notify-send "Dictation" "Recording started" -t 1000')
+        self.audio_queue.queue.clear()
 
         with sd.InputStream(callback=self.callback,
                           channels=1,
                           samplerate=self.sample_rate,
                           dtype=self.dtype):
-            while self.recording and get_state()["recording"]:
+            while self.recording:  # Simplified loop condition
                 try:
                     data = self.audio_queue.get(timeout=0.1)
                     self.audio_data.append(data)
@@ -105,38 +102,36 @@ class DictationSystem:
 
     def stop_recording(self):
         """Stop recording and process the audio"""
+        logging.info("Stopping recording")
         self.recording = False
-        set_state(False)
-        os.system('notify-send "Dictation" "Processing audio..." -t 1000')
 
         if not self.audio_data:
             return ""
 
         # Combine all audio chunks
         audio = np.concatenate(self.audio_data, axis=0)
+        logging.info(f"Processing audio: length={len(audio)}, max={np.max(audio)}, min={np.min(audio)}")
 
         # Use Whisper to transcribe
-        result = self.model.transcribe(audio.flatten(), language="en")
-        return result["text"].strip()
+        try:
+            result = self.model.transcribe(audio.flatten(), language="en")
+            logging.info(f"Transcription result: {result}")
+            text = result["text"].strip()
+            logging.info(f"Processed text: {text}")
+            return text
+        except Exception as e:
+            logging.error(f"Transcription error: {e}", exc_info=True)
+            return ""
 
     def type_text(self, text):
-        """Type the transcribed text using appropriate tool"""
+        """Type the transcribed text using ydotool"""
         if text:
-            display_server = get_display_server()
-            if display_server == 'wayland':
-                try:
-                    # Using ydotool to type text
-                    os.system(f'ydotool type "{text} "')
-                    os.system(f'notify-send "Dictation" "Transcribed: {text[:50]}..." -t 2000')
-                except Exception as e:
-                    print(f"Error typing text: {e}")
-                    os.system(f'notify-send "Dictation Error" "{str(e)}" -t 2000')
-
-            else:
-                # Use xdotool for X11
-                os.system(f'xdotool type "{text} "')
-
-            os.system(f'notify-send "Dictation" "Transcribed: {text[:50]}..." -t 2000')
+            try:
+                logging.info(f"Attempting to type text: {text}")
+                os.system(f'ydotool type "{text} "')
+                logging.info("Text typed successfully")
+            except Exception as e:
+                logging.info(f"Error typing text: {e}", exc_info=True)
 
 def run_service():
     # Remove socket if it exists
@@ -159,39 +154,16 @@ def run_service():
         conn, addr = server.accept()
         try:
             command = conn.recv(1024).decode('utf-8').strip()
-            response = dictation.handle_command(command)
+            # notify-send debug statement
+            logging.info(f'Received command: {command}')
+            if command == "TOGGLE":
+                response = dictation.handle_toggle()
+            else:
+                response = "Invalid command"
+
             conn.send(response.encode('utf-8'))
         finally:
             conn.close()
 
 if __name__ == "__main__":
     run_service()
-
-# def start_dictation():
-#     set_state(True)
-#     parser = argparse.ArgumentParser(description="Whisper-based dictation system")
-#     parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large"],
-#                       help="Whisper model to use")
-#     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
-#                       help="Device to run the model on (cuda/cpu)")
-#     args = parser.parse_args()
-
-#     try:
-#         dictation = DictationSystem(args.model, args.device)
-#         dictation.start_recording()
-#         text = dictation.stop_recording()
-#         if text:
-#             dictation.type_text(text)
-#     except Exception as e:
-#         os.system(f'notify-send "Dictation Error" "{str(e)}" -t 2000')
-#         print(f"\nError: {str(e)}")
-#         sys.exit(1)
-
-# def stop_dictation():
-#     set_state(False)
-
-# if __name__ == "__main__":
-#     if len(sys.argv) > 1 and sys.argv[1] == "--stop":
-#         stop_dictation()
-#     else:
-#         start_dictation()
