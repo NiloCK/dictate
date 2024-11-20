@@ -191,7 +191,7 @@ class DictationSystem:
         if text:
             try:
                 logging.info(f"Attempting to type text: {text}")
-                os.system(f'ydotool type "{text} "')
+                os.system(f'ydotool type --key-delay 4 "{text} "')
                 logging.info("Text typed successfully")
             except Exception as e:
                 logging.info(f"Error typing text: {e}", exc_info=True)
