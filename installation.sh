@@ -21,7 +21,7 @@ VENV_PATH="/opt/dictation_venv"
 python3 -m venv "$VENV_PATH"
 
 # Install required python packages
-"$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch scipy
+"$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch scipy pystray Pillow
 
 
 # install required linux tools ... ydotool, ... ? (todo)
@@ -31,6 +31,7 @@ python3 -m venv "$VENV_PATH"
 cp ./src/dictation_daemon.py /usr/local/bin/
 cp ./src/dictation_client.py /usr/local/bin/
 cp ./src/dictation.sh /usr/local/bin/
+cp ./red-circle.png /usr/local/bin/
 
 chmod +x /usr/local/bin/dictation_daemon.py
 chmod +x /usr/local/bin/dictation_client.py
@@ -51,10 +52,12 @@ After=network.target
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_daemon.py
 Environment=HOME=/root  # or wherever you want the models to be stored
 Environment=XDG_CACHE_HOME=/var/cache/whisper
+Environment=DISPLAY=:0
 User=root
 Group=root
 Restart=always
 RestartSec=3
+WorkingDirectory=/usr/local/bin
 
 [Install]
 WantedBy=multi-user.target
