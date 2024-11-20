@@ -28,9 +28,9 @@ python3 -m venv "$VENV_PATH"
 
 
 # place files
-cp ./dictation_daemon.py /usr/local/bin/
-cp ./dictation_client.py /usr/local/bin/
-cp ./dictation.sh /usr/local/bin/
+cp ./src/dictation_daemon.py /usr/local/bin/
+cp ./src/dictation_client.py /usr/local/bin/
+cp ./src/dictation.sh /usr/local/bin/
 
 chmod +x /usr/local/bin/dictation_daemon.py
 chmod +x /usr/local/bin/dictation_client.py
