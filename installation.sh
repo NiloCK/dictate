@@ -36,6 +36,7 @@ cp ./src/dictation_tray_daemon.py /usr/local/bin/
 cp ./src/dictation_client.py /usr/local/bin/
 cp ./src/dictation.sh /usr/local/bin/
 cp ./red-circle.png /usr/local/bin/
+cp ./grey-circle.png /usr/local/bin/
 
 chmod +x /usr/local/bin/dictation_daemon.py
 chmod +x /usr/local/bin/dictation_tray_daemon.py

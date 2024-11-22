@@ -26,6 +26,7 @@ logging.basicConfig(
 )
 
 SOCKET_PATH = '/tmp/dictation.sock'
+TRAY_SOCKET_PATH = '/tmp/dictation_tray.sock'
 
 def download_model(model_name):
     """Download the model before starting the system"""
@@ -141,6 +142,14 @@ class DictationSystem:
     def stop_recording(self):
         """Stop recording and process the audio"""
         logging.info("Stopping recording")
+        # inform the tray service that recording has stopped
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as tray_sock:
+                tray_sock.connect(TRAY_SOCKET_PATH)
+                tray_sock.send("RECORDING_STOPPED".encode('utf-8'))
+        except Exception as e:
+            logging.error(f"Failed to notify tray service: {e}")
+
 
         if not self.audio_data:
             logging.warning("No audio data collected")

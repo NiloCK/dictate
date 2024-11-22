@@ -49,6 +49,14 @@ class TrayService:
             self.icon = pystray.Icon("Dictate", image, "Recording...")
             threading.Thread(target=self.icon.run, daemon=True).start()
 
+    def show_grey_icon(self):
+        image = Image.open("/usr/local/bin/grey-circle.png")
+        if self.icon:
+            self.icon.icon = image
+        else:
+            self.icon = pystray.Icon("Dictate", image, "Recording stopped")
+            threading.Thread(target=self.icon.run, daemon=True).start()
+
     def hide_icon(self):
         if self.icon:
             self.icon.stop()
@@ -75,9 +83,14 @@ if __name__ == "__main__":
             command = conn.recv(1024).decode('utf-8').strip()
             logging.info(f'Received tray command: {command}')
             if command == "SHOW":
+                logging.info("Showing icon")
                 trayService.show_icon()
             elif command == "HIDE":
+                logging.info("Hiding icon")
                 trayService.hide_icon()
+            elif command == "RECORDING_STOPPED":
+                logging.info("Recording stopped")
+                trayService.show_grey_icon()
             else:
                 logging.error("Invalid tray command")
         except:
