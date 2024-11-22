@@ -3,27 +3,37 @@
 
 import socket
 import sys
-import os
+import logging
 
-SOCKET_PATH = '/tmp/dictation.sock'
+DAEMON_SOCKET = '/tmp/dictation.sock'
+TRAY_SOCKET = '/tmp/dictation_tray.sock'
 
-def send_command():
-    # os.system(f'notify-send "Dictation Client" "sending command" -t 1000')
+def send_tray_command(command):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.connect(SOCKET_PATH)
-            client.send('TOGGLE'.encode('utf-8'))
-            response = client.recv(1024).decode('utf-8')
-            print(response)
-            # os.system(f'notify-send "Dictation Client" "Server response: {response}" -t 1000')
+            client.connect(TRAY_SOCKET)
+            client.send(command.encode('utf-8'))
+            return client.recv(1024).decode('utf-8')
     except Exception as e:
-        print(f"Error: {e}")
-        # os.system(f'notify-send "Dictation Client Error" "{str(e)}" -t 2000')
+        logging.error(f"Error communicating with tray service: {e}")
+
+def send_daemon_command(command):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(DAEMON_SOCKET)
+            client.send(command.encode('utf-8'))
+            response = client.recv(1024).decode('utf-8')
+            return response
+    except Exception as e:
+        logging.error(f"Error communicating with daemon: {e}")
+
+def main():
+    response = send_daemon_command('TOGGLE')
+    if response:
+        if "started" in response.lower():
+            send_tray_command('SHOW')
+        elif "processed" in response.lower():
+            send_tray_command('HIDE')
 
 if __name__ == "__main__":
-    # os.system(f'notify-send "Dictation Client Called" -t 1000')
-    # if len(sys.argv) != 2 or sys.argv[1] not in ["START", "STOP"]:
-    #     print("Usage: dictation_client.py [START|STOP]")
-    #     sys.exit(1)
-
-    send_command()
+    main()

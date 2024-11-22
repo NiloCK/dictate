@@ -13,8 +13,6 @@ import os
 import socket
 import threading
 import logging
-import pystray
-from PIL import Image
 import signal
 import sys
 
@@ -28,28 +26,6 @@ logging.basicConfig(
 )
 
 SOCKET_PATH = '/tmp/dictation.sock'
-
-
-def create_recording_icon():
-    # Create an icon
-    image = Image.open("./red-circle.png")
-
-    def on_clicked(icon, item):
-        if str(item) == "Exit":
-            icon.stop()
-            sys.exit(0)
-
-    # Create a menu
-    menu = (
-        pystray.MenuItem("Status: Running", None),
-        pystray.MenuItem("Exit", on_clicked)
-    )
-
-    # Create the tray icon
-    icon = pystray.Icon("Dictate", image, "My App", menu)
-
-    return icon
-
 
 def download_model(model_name):
     """Download the model before starting the system"""
@@ -66,7 +42,6 @@ def download_model(model_name):
     except RuntimeError as e:
         logging.error(f"Error loading model: {e}")
         logging.info("Attempting to download model...")
-        # maybe: add explicit download code here
         raise
     except KeyboardInterrupt:
         logging.info("\nModel download interrupted. Please try again.")
@@ -87,32 +62,12 @@ class DictationSystem:
         default_device = sd.query_devices(kind='input')
         logging.info(f"Default input device:\n{default_device}")
 
-        self.icon = None  # Initialize as None, we'll create it when needed
-        self.icon_thread = None
         self.model = download_model(model_name)
         self.recording = False
         self.audio_queue = queue.Queue()
         self.sample_rate = 16000
         self.dtype = np.float32
         self.recording_thread = None
-
-    def set_recording(self, state):
-        self.recording = state
-
-        if state:  # If starting recording
-            if not self.icon:
-                self.icon = create_recording_icon()
-                self.icon_thread = threading.Thread(target=self.icon.run)
-                self.icon_thread.daemon = True
-                self.icon_thread.start()
-                logging.info("Recording icon displayed")
-        else:  # If stopping recording
-            if self.icon:
-                self.icon.stop()
-                self.icon = None
-                self.icon_thread = None
-                logging.info("Recording icon removed")
-
 
     def handle_toggle(self):
         logging.info("Received TOGGLE command")
@@ -121,7 +76,7 @@ class DictationSystem:
             self.recording_thread.start()
             return "Recording started"
         else:
-            self.set_recording(False)
+            self.recording = False
             if self.recording_thread:
                 self.recording_thread.join()
             text = self.stop_recording()
@@ -139,7 +94,7 @@ class DictationSystem:
     def start_recording(self):
         """Start recording audio"""
         logging.info("Recording audio...")
-        self.set_recording(True)
+        self.recording = True
         self.audio_data = []
 
         # Try multiple device configurations
@@ -167,18 +122,13 @@ class DictationSystem:
                         try:
                             data = self.audio_queue.get(timeout=0.1)
                             current_max = np.max(np.abs(data))
-                            # if len(self.audio_data) % 10 == 0:
-                            #     logging.info(f"Current audio chunk - max level: {current_max}")
 
-                            # Only append if we're getting actual audio
-                            # [ ] reconsider - is this chopping pauses in speech that make it harder for the model to parst?
                             if current_max > 0.0001:  # Threshold for noise
                                 self.audio_data.append(data)
 
                         except queue.Empty:
                             continue
 
-                    # If we get here, recording stopped normally
                     return
 
             except Exception as e:
@@ -186,12 +136,11 @@ class DictationSystem:
                 continue
 
         logging.error("Failed to open any audio device")
-        self.set_recording(False)
+        self.recording = False
 
     def stop_recording(self):
         """Stop recording and process the audio"""
         logging.info("Stopping recording")
-        self.set_recording(False)
 
         if not self.audio_data:
             logging.warning("No audio data collected")
@@ -263,7 +212,6 @@ def run_service():
         conn, addr = server.accept()
         try:
             command = conn.recv(1024).decode('utf-8').strip()
-            # notify-send debug statement
             logging.info(f'Received command: {command}')
             if command == "TOGGLE":
                 response = dictation.handle_toggle()
