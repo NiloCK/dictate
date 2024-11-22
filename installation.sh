@@ -94,4 +94,4 @@ systemctl start dictation
 systemctl enable dictation_tray
 systemctl start dictation_tray
 
-echo "Installation complete. Check status with 'systemctl status dictation'"
+echo "Installation complete. Check status with 'systemctl status dictation', 'systemctl status dictation_tray'"
