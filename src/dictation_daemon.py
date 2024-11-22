@@ -28,6 +28,139 @@ logging.basicConfig(
 SOCKET_PATH = '/tmp/dictation.sock'
 TRAY_SOCKET_PATH = '/tmp/dictation_tray.sock'
 
+class AudioDeviceHandler:
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.sample_rate = 16000  # desired rate
+        self.dtype = np.float32
+
+    def list_devices(self):
+        """List all available audio input devices"""
+        devices = sd.query_devices()
+        input_devices = []
+
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                input_devices.append({
+                    'id': i,
+                    'name': device['name'],
+                    'channels': device['max_input_channels'],
+                    'default_sr': device['default_samplerate'],
+                    'is_default': device == sd.query_devices(kind='input'),
+                    'hostapi': device['hostapi']
+                })
+
+        self.logger.info("Available input devices:")
+        for dev in input_devices:
+            self.logger.info(f"ID {dev['id']}: {dev['name']} "
+                           f"(channels: {dev['channels']}, "
+                           f"default sr: {dev['default_sr']}, "
+                           f"default: {dev['is_default']}, "
+                           f"hostapi: {dev['hostapi']})")
+
+        return input_devices
+
+    def is_hardware_device(self, device_info):
+        """Check if this is likely a real hardware device"""
+        name = device_info['name'].lower()
+        # Filter out ALSA plugins and virtual devices
+        virtual_indicators = [
+            'sysdefault', 'default', 'samplerate', 'speexrate',
+            'upmix', 'vdownmix', 'null', 'dummy', 'loop'
+        ]
+        return not any(x in name for x in virtual_indicators)
+
+    def _test_device(self, device_id, channels, sample_rate):
+        """Test if a device configuration works and actually receives audio"""
+        try:
+            test_duration = 0.1  # seconds
+            recorded_frames = []
+
+            def callback(indata, frames, time, status):
+                if status:
+                    self.logger.warning(f"Status: {status}")
+                recorded_frames.append(indata.copy())
+
+            with sd.InputStream(
+                device=device_id,
+                channels=channels,
+                samplerate=sample_rate,
+                dtype=self.dtype,
+                callback=callback,
+                blocksize=int(sample_rate * test_duration)
+            ) as stream:
+                sd.sleep(int(test_duration * 1000))
+
+            if recorded_frames:
+                audio = np.concatenate(recorded_frames, axis=0)
+                audio_level = np.abs(audio).mean()
+
+                self.logger.info(f"Device {device_id} test - "
+                               f"Audio level: {audio_level}, "
+                               f"Shape: {audio.shape}, "
+                               f"Sample rate: {sample_rate}")
+
+                return True
+
+            return False
+
+        except Exception as e:
+            self.logger.debug(f"Device {device_id} test failed: {e}")
+            return False
+
+    def create_input_stream(self, callback):
+        """Create and return an InputStream with the current configuration"""
+        return sd.InputStream(
+            callback=callback,
+            device=self.device_id,
+            channels=self.channels,
+            samplerate=self.sample_rate,
+            dtype=self.dtype
+        )
+
+    def get_working_device(self):
+        """Find a working input device configuration."""
+        devices = self.list_devices()
+
+        # First try hardware devices
+        hardware_devices = [d for d in devices if self.is_hardware_device(d)]
+        self.logger.info(f"Found {len(hardware_devices)} hardware devices")
+
+        # Try hardware devices first
+        for device in hardware_devices:
+            device_id = device['id']
+            original_sr = int(device['default_sr'])
+
+            # Try with device's native sample rate first
+            if self._test_device(device_id, 2, original_sr):
+                self.sample_rate = original_sr  # Update instance sample rate
+                self.device_id = device_id      # Store the working device ID
+                self.channels = 2               # Store the working channel count
+                self.logger.info(f"Found working hardware device {device_id} "
+                                f"at {original_sr} Hz")
+                return device_id, 2
+
+            # Try with our desired sample rate
+            if self._test_device(device_id, 2, self.sample_rate):
+                self.device_id = device_id
+                self.channels = 2
+                self.logger.info(f"Found working hardware device {device_id} "
+                                f"at {self.sample_rate} Hz")
+                return device_id, 2
+
+        # If no hardware devices work, try virtual devices as fallback
+        self.logger.warning("No hardware devices working, trying virtual devices")
+        for device in devices:
+            device_id = device['id']
+            if self._test_device(device_id, 1, self.sample_rate):
+                self.device_id = device_id
+                self.channels = 1
+                self.logger.info(f"Found working virtual device {device_id}")
+                return device_id, 1
+
+        raise RuntimeError("No working audio input device found")
+
+
 def download_model(model_name):
     """Download the model before starting the system"""
     logging.info(f"Downloading model: {model_name}")
@@ -51,23 +184,19 @@ def download_model(model_name):
         logging.error(f"Unexpected error downloading model: {e}", exc_info=True)
         raise
 
+
 class DictationSystem:
     def __init__(self, model_name="base", device=None):
-        logging.info(f"Initializing DictationSystem")
+        logging.info("Initializing DictationSystem")
 
-        # List available audio devices
-        devices = sd.query_devices()
-        logging.info(f"Available audio devices:\n{devices}")
-
-        # Get default input device
-        default_device = sd.query_devices(kind='input')
-        logging.info(f"Default input device:\n{default_device}")
+        # Initialize audio handler
+        self.audio_handler = AudioDeviceHandler()
+        self.device_id, self.channels = self.audio_handler.get_working_device()
+        self.sample_rate = self.audio_handler.sample_rate  # Get the working sample rate
 
         self.model = download_model(model_name)
         self.recording = False
         self.audio_queue = queue.Queue()
-        self.sample_rate = 16000
-        self.dtype = np.float32
         self.recording_thread = None
 
     def handle_toggle(self):
@@ -98,58 +227,31 @@ class DictationSystem:
         self.recording = True
         self.audio_data = []
 
-        # Try multiple device configurations
-        devices_to_try = [
-            {"device": 0, "channels": 2},  # First ALSA device (hw:0,0) with 2 channels
-            {"device": 4, "channels": 4},  # Device with 4 input channels (hw:0,6)
-            {"device": 5, "channels": 4},  # Alternative 4-channel device (hw:0,7)
-        ]
+        try:
+            with self.audio_handler.create_input_stream(self.callback) as stream:
+                logging.info("Successfully opened audio stream")
 
-        for device_config in devices_to_try:
-            try:
-                logging.info(f"Attempting to open device {device_config['device']} "
-                            f"with {device_config['channels']} channels")
+                while self.recording:
+                    try:
+                        data = self.audio_queue.get(timeout=0.1)
+                        # if np.max(np.abs(data)) > 0.0001:  # Threshold for noise
+                        self.audio_data.append(data)
+                    except queue.Empty:
+                        continue
 
-                with sd.InputStream(
-                    callback=self.callback,
-                    device=device_config['device'],
-                    channels=device_config['channels'],
-                    samplerate=self.sample_rate,
-                    dtype=self.dtype
-                ) as stream:
-                    logging.info(f"Successfully opened audio stream with device {device_config['device']}")
-
-                    while self.recording:
-                        try:
-                            data = self.audio_queue.get(timeout=0.1)
-                            current_max = np.max(np.abs(data))
-
-                            if current_max > 0.0001:  # Threshold for noise
-                                self.audio_data.append(data)
-
-                        except queue.Empty:
-                            continue
-
-                    return
-
-            except Exception as e:
-                logging.error(f"Error with device {device_config['device']}: {str(e)}")
-                continue
-
-        logging.error("Failed to open any audio device")
-        self.recording = False
+        except Exception as e:
+            logging.error(f"Error recording audio: {str(e)}")
+            self.recording = False
 
     def stop_recording(self):
         """Stop recording and process the audio"""
         logging.info("Stopping recording")
-        # inform the tray service that recording has stopped
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as tray_sock:
                 tray_sock.connect(TRAY_SOCKET_PATH)
                 tray_sock.send("RECORDING_STOPPED".encode('utf-8'))
         except Exception as e:
             logging.error(f"Failed to notify tray service: {e}")
-
 
         if not self.audio_data:
             logging.warning("No audio data collected")
@@ -171,14 +273,23 @@ class DictationSystem:
             logging.info(f"Processing audio: length={len(audio)}, "
                         f"max={np.max(audio)}, min={np.min(audio)}")
 
-            # Save debug WAV file
+            # Save debug WAV file at original sample rate
             try:
                 import scipy.io.wavfile as wav
                 wav.write('/tmp/last_recording.wav', self.sample_rate,
                             (audio * 32767).astype(np.int16))
-                logging.info("Saved debug audio file to /tmp/last_recording.wav")
+                logging.info(f"Saved debug audio file to /tmp/last_recording.wav "
+                            f"at {self.sample_rate} Hz")
             except Exception as e:
                 logging.error(f"Error saving debug audio: {e}")
+
+            # Resample for Whisper if needed
+            if self.sample_rate != 16000:
+                logging.info(f"Resampling audio from {self.sample_rate} Hz to 16000 Hz")
+                from scipy import signal
+                audio = signal.resample(audio,
+                                        int(len(audio) * 16000 / self.sample_rate))
+                logging.info(f"Resampled audio shape: {audio.shape}")
 
             # Use Whisper to transcribe
             result = self.model.transcribe(audio, language="en")
