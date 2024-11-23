@@ -124,5 +124,25 @@ systemctl start dictation
 systemctl enable dictation_tray
 systemctl start dictation_tray
 
-echo "Installation complete. Check status with 'systemctl status dictation' and 'systemctl status dictation_tray'"
-echo "If the tray icon doesn't appear, you may need to log out and back in, or restart the dictation_tray service."
+# Check if services started successfully
+echo "Verifying services..."
+if systemctl is-active --quiet dictation; then
+    echo "✓ Dictation service started successfully"
+else
+    echo "✗ Dictation service failed to start"
+    echo "Check logs with: journalctl -u dictation"
+fi
+
+if systemctl is-active --quiet dictation_tray; then
+    echo "✓ Dictation tray service started successfully"
+else
+    echo "✗ Dictation tray service failed to start"
+    echo "Check logs with: journalctl -u dictation_tray"
+fi
+
+echo "Installation complete."
+
+if ! systemctl is-active --quiet dictation || ! systemctl is-active --quiet dictation_tray; then
+    echo "Some services failed to start. Review the errors above and check logs for more details."
+    echo "You can check service status with: 'systemctl status dictation' and 'systemctl status dictation_tray'"
+fi
