@@ -19,6 +19,14 @@ This system provides real-time voice dictation capabilities by:
 
 ## Installation
 
+Either:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/yourusername/yourrepo/main/remote_install.sh | bash
+```
+
+Or:
+
 1. Clone this repository:
 ```bash
 git clone [repository-url]
