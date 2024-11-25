@@ -47,6 +47,7 @@ sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install openai-whisper sounddevice num
 cp ./src/dictation_daemon.py /usr/local/bin/
 cp ./src/dictation_tray_daemon.py /usr/local/bin/
 cp ./src/dictation_client.py /usr/local/bin/
+cp ./src/config_manager.py /usr/local/bin/
 cp ./src/dictation.sh /usr/local/bin/
 cp ./red-circle.png /usr/local/bin/
 cp ./grey-circle.png /usr/local/bin/
@@ -54,6 +55,7 @@ cp ./grey-circle.png /usr/local/bin/
 # Set executable permissions
 chmod +x /usr/local/bin/dictation_daemon.py
 chmod +x /usr/local/bin/dictation_tray_daemon.py
+chmod +x /usr/local/bin/config_manager.py
 chmod +x /usr/local/bin/dictation_client.py
 chmod +x /usr/local/bin/dictation.sh
 
@@ -62,6 +64,23 @@ chmod 644 /usr/local/bin/red-circle.png
 chmod 644 /usr/local/bin/grey-circle.png
 chown $ACTUAL_USER:$ACTUAL_USER /usr/local/bin/red-circle.png
 chown $ACTUAL_USER:$ACTUAL_USER /usr/local/bin/grey-circle.png
+
+# Create config directory and set permissions
+CONFIG_DIR="/home/$ACTUAL_USER/.config/dictation"
+mkdir -p "$CONFIG_DIR"
+chown -R $ACTUAL_USER:$ACTUAL_USER "$CONFIG_DIR"
+
+# Create initial config if it doesn't exist
+if [ ! -f "$CONFIG_DIR/config.json" ]; then
+    cat > "$CONFIG_DIR/config.json" << EOL
+{
+    "hotkey": "ctrl+alt+d",
+    "audio_device": null,
+    "model": "base"
+}
+EOL
+    chown $ACTUAL_USER:$ACTUAL_USER "$CONFIG_DIR/config.json"
+fi
 
 # Set up working dir for models
 mkdir -p /var/cache/whisper
@@ -139,6 +158,8 @@ else
     echo "✗ Dictation tray service failed to start"
     echo "Check logs with: journalctl -u dictation_tray"
 fi
+
+
 
 echo "Installation complete."
 

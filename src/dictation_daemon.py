@@ -15,6 +15,9 @@ import threading
 import logging
 import signal
 import sys
+import json
+from pathlib import Path
+from config_manager import ConfigManager
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -27,6 +30,7 @@ logging.basicConfig(
 
 SOCKET_PATH = '/tmp/dictation.sock'
 TRAY_SOCKET_PATH = '/tmp/dictation_tray.sock'
+
 
 class AudioDeviceHandler:
     def __init__(self):
@@ -186,15 +190,40 @@ def download_model(model_name):
 
 
 class DictationSystem:
-    def __init__(self, model_name="base", device=None):
+    def __init__(self):
         logging.info("Initializing DictationSystem")
+        self.config = ConfigManager()
+        self.load_configuration()
+
+    def load_configuration(self):
+        """Load or reload configuration"""
+        config_data = self.config.load_config()
 
         # Initialize audio handler
         self.audio_handler = AudioDeviceHandler()
-        self.device_id, self.channels = self.audio_handler.get_working_device()
-        self.sample_rate = self.audio_handler.sample_rate  # Get the working sample rate
 
+        # Set model from config
+        model_name = config_data.get('model', 'base')
         self.model = download_model(model_name)
+
+        # Configure audio device
+        configured_device = config_data.get('audio_device')
+        if configured_device is not None:
+            try:
+                if self.audio_handler._test_device(configured_device, 2, self.audio_handler.sample_rate):
+                    self.device_id = configured_device
+                    self.channels = 2
+                else:
+                    raise RuntimeError("Configured device doesn't work")
+            except Exception as e:
+                logging.warning(f"Configured device {configured_device} failed: {e}")
+                self.device_id, self.channels = self.audio_handler.get_working_device()
+                self.config.update_config(audio_device=self.device_id)
+        else:
+            self.device_id, self.channels = self.audio_handler.get_working_device()
+            self.config.update_config(audio_device=self.device_id)
+
+        self.sample_rate = self.audio_handler.sample_rate
         self.recording = False
         self.audio_queue = queue.Queue()
         self.recording_thread = None
@@ -311,6 +340,41 @@ class DictationSystem:
             except Exception as e:
                 logging.info(f"Error typing text: {e}", exc_info=True)
 
+    def handle_command(self, command):
+        """Handle various commands from the client"""
+        if command == "TOGGLE":
+            return self.handle_toggle()
+        elif command == "LIST_DEVICES":
+            return self.handle_list_devices()
+        elif command == "RELOAD_CONFIG":
+            return self.handle_reload_config()
+        else:
+            return "Invalid command"
+
+    def handle_list_devices(self):
+        """Return a formatted list of audio devices"""
+        devices = self.audio_handler.list_devices()
+        response = []
+        for dev in devices:
+            status = "ACTIVE" if dev['id'] == self.device_id else ""
+            response.append(
+                f"ID {dev['id']}: {dev['name']} "
+                f"(channels: {dev['channels']}, "
+                f"default sr: {dev['default_sr']}, "
+                f"default: {dev['is_default']}) {status}"
+            )
+        return "\n".join(response)
+
+    def handle_reload_config(self):
+        """Reload configuration"""
+        try:
+            self.load_configuration()
+            return "Configuration reloaded successfully"
+        except Exception as e:
+            logging.error(f"Error reloading configuration: {e}")
+            return f"Error reloading configuration: {str(e)}"
+
+
 def run_service():
     # Remove socket if it exists
     try:
@@ -333,12 +397,15 @@ def run_service():
         try:
             command = conn.recv(1024).decode('utf-8').strip()
             logging.info(f'Received command: {command}')
-            if command == "TOGGLE":
-                response = dictation.handle_toggle()
-            else:
-                response = "Invalid command"
 
+            response = dictation.handle_command(command)
             conn.send(response.encode('utf-8'))
+        except Exception as e:
+            logging.error(f"Error handling command: {e}")
+            try:
+                conn.send(f"Error: {str(e)}".encode('utf-8'))
+            except:
+                pass
         finally:
             conn.close()
 
