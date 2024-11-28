@@ -22,7 +22,7 @@ This system provides real-time voice dictation capabilities by:
 Either:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/yourusername/yourrepo/main/remote_install.sh | bash
+curl -sSL https://raw.githubusercontent.com/nilock/dictate/main/remote_install.sh | bash
 ```
 
 Or:

@@ -31,7 +31,7 @@ TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR" || exit 1
 
 # Clone the repository
-git clone https://github.com/yourusername/yourrepo.git .
+git clone https://github.com/nilock/dictate.git .
 
 # Make the installation script executable
 chmod +x installation.sh
