@@ -51,6 +51,7 @@ cp ./src/config_manager.py /usr/local/bin/
 cp ./src/dictation.sh /usr/local/bin/
 cp ./red-circle.png /usr/local/bin/
 cp ./grey-circle.png /usr/local/bin/
+cp ./hollow-circle.png /usr/local/bin/
 
 # Set executable permissions
 chmod +x /usr/local/bin/dictation_daemon.py

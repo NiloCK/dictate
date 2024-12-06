@@ -36,9 +36,9 @@ def toggle_recording():
     response = send_daemon_command('TOGGLE')
     if response:
         if "started" in response.lower():
-            send_tray_command('SHOW')
+            send_tray_command('RECORDING_STARTED')
         elif "processed" in response.lower():
-            send_tray_command('HIDE')
+            send_tray_command('PROCESSED')
 
 
 def list_devices():

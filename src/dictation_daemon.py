@@ -233,7 +233,7 @@ class DictationSystem:
         if not self.recording:
             self.recording_thread = threading.Thread(target=self.start_recording)
             self.recording_thread.start()
-            return "Recording started"
+            return "RECORDING_STARTED"
         else:
             self.recording = False
             if self.recording_thread:
@@ -242,7 +242,7 @@ class DictationSystem:
             self.type_text(text)
             self.audio_data = []  # Clear the audio data after processing
             self.audio_queue.queue.clear()  # Clear the queue
-            return f'Processed: "{text}"'
+            return f'PROCESSED: "{text}"'
 
     def callback(self, indata, frames, time, status):
         if status:
