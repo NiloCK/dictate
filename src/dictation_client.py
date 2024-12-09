@@ -24,12 +24,18 @@ def send_tray_command(command):
 def send_daemon_command(command):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
             client.connect(DAEMON_SOCKET)
             client.send(command.encode('utf-8'))
             response = client.recv(1024).decode('utf-8')
             return response
+    except socket.timeout:
+        logging.error("Timeout waiting for daemon response")
+        return "ERROR: Timeout"
     except Exception as e:
         logging.error(f"Error communicating with daemon: {e}")
+        return f"ERROR: {str(e)}"
+
 
 
 def toggle_recording():
