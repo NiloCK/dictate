@@ -26,11 +26,31 @@ systemctl disable dictation 2>/dev/null
 systemctl stop dictation_tray 2>/dev/null
 systemctl disable dictation_tray 2>/dev/null
 
+# Clean user services
+if [ -n "$ACTUAL_USER" ]; then
+    # Check if user exists and has systemd running
+    if id "$ACTUAL_USER" &>/dev/null && \
+       [ -d "/run/user/$(id -u $ACTUAL_USER)" ]; then
+        sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) \
+            systemctl --user stop dictation_tray 2>/dev/null
+        sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) \
+            systemctl --user disable dictation_tray 2>/dev/null
+        # Remove user service file
+        rm -f /home/$ACTUAL_USER/.config/systemd/user/dictation_tray.service
+    fi
+fi
+
 rm -f /usr/local/bin/dictation_daemon.py
 rm -f /usr/local/bin/dictation_client.py
 rm -f /usr/local/bin/dictation_tray_daemon.py
 rm -f /usr/local/bin/dictation.sh
+rm -f /usr/local/bin/config_manager.py
 rm -f /etc/systemd/system/dictation.service
+rm -f /etc/systemd/system/dictation_tray.service
+
+# Remove system-level tray service if it exists
+systemctl stop dictation_tray 2>/dev/null
+systemctl disable dictation_tray 2>/dev/null
 rm -f /etc/systemd/system/dictation_tray.service
 
 # Install python3-venv if not already installed
@@ -45,6 +65,10 @@ if ! dpkg -l | grep -q "python3-venv"; then
         apt-get update && apt-get install -y python3-venv
     fi
 fi
+
+# Install system dependencies
+echo "Installing system dependencies..."
+apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool
 
 # Create virtual environment
 VENV_PATH="/opt/dictation_venv"
@@ -127,26 +151,27 @@ WorkingDirectory=/usr/local/bin
 WantedBy=multi-user.target
 EOL
 
-cat > /etc/systemd/system/dictation_tray.service << EOL
+# Set up user-level systemd service for the tray
+echo "Setting up user-level systemd service for tray icon..."
+mkdir -p /home/$ACTUAL_USER/.config/systemd/user/
+cat > /home/$ACTUAL_USER/.config/systemd/user/dictation_tray.service << EOL
 [Unit]
 Description=Dictation Tray Service
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_tray_daemon.py
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/$ACTUAL_USER/.Xauthority
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER)
-User=$ACTUAL_USER
-Group=$ACTUAL_USER
-Restart=always
+Restart=on-failure
 RestartSec=3
 WorkingDirectory=/usr/local/bin
 
 [Install]
 WantedBy=graphical-session.target
 EOL
+
+chown -R $ACTUAL_USER:$ACTUAL_USER /home/$ACTUAL_USER/.config/systemd/
 
 # Set permissions for service files
 chmod 644 /etc/systemd/system/dictation.service
@@ -157,8 +182,11 @@ echo "Enabling and starting dictation services..."
 systemctl daemon-reload
 systemctl enable dictation
 systemctl start dictation
-systemctl enable dictation_tray
-systemctl start dictation_tray
+
+loginctl enable-linger $ACTUAL_USER
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user daemon-reload
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user enable dictation_tray.service
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user start dictation_tray.service
 
 # Check if services started successfully
 echo "Verifying services..."
@@ -169,16 +197,16 @@ else
     echo "Check logs with: journalctl -u dictation"
 fi
 
-if systemctl is-active --quiet dictation_tray; then
+if sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user is-active --quiet dictation_tray; then
     echo "✓ Dictation tray service started successfully"
 else
     echo "✗ Dictation tray service failed to start"
-    echo "Check logs with: journalctl -u dictation_tray"
+    echo "Check logs with: sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user status dictation_tray"
 fi
 
 echo "Installation complete."
 
-if ! systemctl is-active --quiet dictation || ! systemctl is-active --quiet dictation_tray; then
+if ! systemctl is-active --quiet dictation ||
+   ! sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user is-active --quiet dictation_tray; then
     echo "Some services failed to start. Review the errors above and check logs for more details."
-    echo "You can check service status with: 'systemctl status dictation' and 'systemctl status dictation_tray'"
 fi
