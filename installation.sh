@@ -33,14 +33,30 @@ rm -f /usr/local/bin/dictation.sh
 rm -f /etc/systemd/system/dictation.service
 rm -f /etc/systemd/system/dictation_tray.service
 
+# Install python3-venv if not already installed
+echo "Checking for Python venv package..."
+PYTHON_VERSION=$(python3 --version | awk '{print $2}' | cut -d. -f1-2)
+if ! dpkg -l | grep -q "python3-venv"; then
+    echo "Installing python3-venv package..."
+    # Try version-specific package first, then fall back to generic
+    if apt-cache show python${PYTHON_VERSION}-venv >/dev/null 2>&1; then
+        apt-get update && apt-get install -y python${PYTHON_VERSION}-venv
+    else
+        apt-get update && apt-get install -y python3-venv
+    fi
+fi
+
 # Create virtual environment
 VENV_PATH="/opt/dictation_venv"
+echo "Creating Python virtual environment at $VENV_PATH..."
 python3 -m venv "$VENV_PATH"
 
 # Set permissions for the virtual environment
 chown -R $ACTUAL_USER:$ACTUAL_USER "$VENV_PATH"
 
 # Install required python packages
+echo "Installing required Python packages..."
+sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install --upgrade pip
 sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch scipy pystray Pillow
 
 # Place files
@@ -159,8 +175,6 @@ else
     echo "✗ Dictation tray service failed to start"
     echo "Check logs with: journalctl -u dictation_tray"
 fi
-
-
 
 echo "Installation complete."
 
