@@ -76,6 +76,8 @@ def handle_config(args):
             print("Configuration updated successfully")
             # Notify daemon to reload configuration
             send_daemon_command('RELOAD_CONFIG')
+            # Notify tray app to refresh its menu
+            send_tray_command('CONFIG_CHANGED')
         else:
             print("Failed to update configuration")
 

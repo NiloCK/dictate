@@ -34,6 +34,47 @@ class TrayService:
     def set_audio_device(self, device_id):
         """Set the audio input device"""
         subprocess.run(['dictation', 'config', '--device', str(device_id)])
+        # Update config cache and refresh menu to show the new selection
+        self.config_manager.load_config()  # Reload config
+        self.refresh_menu()
+
+    def get_audio_devices(self):
+        """Get list of audio devices from the daemon"""
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect('/tmp/dictation.sock')
+                client.send('LIST_DEVICES'.encode('utf-8'))
+                response = client.recv(4096).decode('utf-8')
+
+                devices = []
+                for line in response.splitlines():
+                    if line.strip():
+                        # Extract ID and name
+                        if "ID " in line and ":" in line:
+                            id_part = line.split(":", 1)[0].strip()
+                            device_id = id_part.replace("ID ", "").strip()
+                            try:
+                                device_id = int(device_id)
+                                is_active = "ACTIVE" in line
+                                devices.append({
+                                    'id': device_id,
+                                    'name': line.split(":", 1)[1].split("(")[0].strip(),
+                                    'is_active': is_active
+                                })
+                            except ValueError:
+                                continue
+                return devices
+        except Exception as e:
+            logging.error(f"Error getting audio devices: {e}")
+            return []
+
+    def refresh_menu(self):
+        """Refresh the menu to update device list"""
+        if self.icon:
+            self.icon.menu = self.create_menu()
+            # Force menu update in pystray
+            if hasattr(self.icon, '_update_menu'):
+                self.icon._update_menu()
 
     def create_menu(self):
         """Create the system tray context menu"""
@@ -53,10 +94,32 @@ class TrayService:
                            checked=lambda item: config['model'] == "large")
         )
 
+        # Create dynamic submenu for audio devices
+        devices = self.get_audio_devices()
+        device_items = []
+        current_device_id = config.get('audio_device')
+
+        for device in devices:
+            device_id = device['id']
+            device_items.append(
+                pystray.MenuItem(
+                    f"{device['name']} (ID: {device_id})",
+                    lambda item, id=device_id: self.set_audio_device(id),
+                    checked=lambda item, id=device_id: id == current_device_id or device.get('is_active', False)
+                )
+            )
+
+        # If no devices found, show a message
+        if not device_items:
+            device_items.append(pystray.MenuItem("No devices found", lambda: None, enabled=False))
+
+        device_menu = pystray.Menu(*device_items)
+
         return pystray.Menu(
             pystray.MenuItem("Configuration", self.show_config_window),
             pystray.MenuItem("Model", model_menu),
-            pystray.MenuItem("Audio Devices", self.list_audio_devices),
+            pystray.MenuItem("Audio Devices", device_menu),
+            pystray.MenuItem("Refresh Devices", lambda: self.refresh_menu()),
             pystray.MenuItem("Quit", self.quit_application)
         )
 
@@ -119,6 +182,10 @@ class TrayService:
                 elif command.startswith("PROCESSED"):
                     logging.info("Switching to idle icon")
                     self.show_idle_icon()
+                elif command == "CONFIG_CHANGED":
+                    logging.info("Configuration changed, refreshing menu")
+                    self.config_manager.load_config()  # Reload config
+                    self.refresh_menu()
                 elif command == "QUIT":
                     logging.info("Quitting application")
                     self.quit_application()
