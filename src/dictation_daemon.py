@@ -2,6 +2,7 @@
 # dictation_daemon.py
 
 import sys
+import subprocess
 import whisper
 import sounddevice as sd
 import numpy as np
@@ -192,6 +193,12 @@ def download_model(model_name):
 class DictationSystem:
     def __init__(self):
         logging.info("Initializing DictationSystem")
+        # Check if ydotool is available
+        try:
+            subprocess.run(['ydotool', '--help'], capture_output=True, text=True)
+        except FileNotFoundError:
+            logging.warning("ydotool not found! Text typing functionality will not work.")
+            sys.exit(1)
         self.config = ConfigManager()
         self.load_configuration()
 
@@ -333,12 +340,20 @@ class DictationSystem:
     def type_text(self, text):
         """Type the transcribed text using ydotool"""
         if text:
+            logging.info(f"Attempting to type text: {text}")
             try:
-                logging.info(f"Attempting to type text: {text}")
-                os.system(f'ydotool type --key-delay 4 "{text} "')
+                # Use subprocess instead of os.system to better handle errors
+                import subprocess
+                result = subprocess.run(['ydotool', 'type', '--key-delay', '4', f"{text} "],
+                                       capture_output=True, text=True, check=True)
                 logging.info("Text typed successfully")
+            except FileNotFoundError:
+                logging.error("ydotool command not found. Please install ydotool.")
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Error typing text: {e}")
+                logging.error(f"Command output: {e.stderr}")
             except Exception as e:
-                logging.info(f"Error typing text: {e}", exc_info=True)
+                logging.error(f"Unexpected error typing text: {e}", exc_info=True)
 
     def handle_command(self, command):
         """Handle various commands from the client"""
