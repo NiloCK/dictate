@@ -22,6 +22,11 @@ class TrayService:
         self.config_manager = ConfigManager()
         self.icon_thread = None
         self.icon_lock = threading.Lock()  # Protect icon operations
+        self.last_icon_refresh = 0  # Time when icon was last refreshed
+
+        # Add watchdog thread for icon health
+        self.watchdog_thread = threading.Thread(target=self.icon_watchdog, daemon=True)
+        self.watchdog_thread.start()
 
     def show_config_window(self):
         """Launch the configuration dialog"""
@@ -241,9 +246,38 @@ class TrayService:
                 self.icon = None
         sys.exit(0)
 
+    def icon_watchdog(self):
+        """Monitor icon health and recreate when necessary"""
+        while self.running:
+            time.sleep(5)  # Check every 5 seconds
+
+            with self.icon_lock:
+                # If icon exists but thread is dead, recreate it
+                if self.icon and (not self.icon_thread or not self.icon_thread.is_alive()):
+                    logging.warning("Watchdog detected dead icon thread, recreating...")
+                    self.recreate_icon()
+                    continue
+
+                # Check if systray manager is valid by using a safe method
+                if self.icon:
+                    try:
+                        # Try a non-destructive operation that requires valid systray_manager
+                        # This is a hack to detect if the underlying X11 connection is still valid
+                        if hasattr(self.icon, '_update_title'):
+                            self.icon._update_title()
+                    except Exception as e:
+                        if "assert self._systray_manager" in str(e) or "_systray_manager" in str(e):
+                            logging.warning(f"Systray manager invalid, recreating icon: {e}")
+                            self.recreate_icon()
+                        else:
+                            logging.error(f"Unexpected icon error: {e}")
+
     def update_icon(self, image_path, tooltip):
         """Common method to update or create the icon"""
         with self.icon_lock:
+            # Record time of update for health check
+            self.last_icon_refresh = time.time()
+
             try:
                 image = Image.open(image_path)
                 if self.icon:
@@ -264,12 +298,6 @@ class TrayService:
         """Create a new systray icon"""
         try:
             image = Image.open(image_path)
-            self.icon = pystray.Icon(
-                "Dictate",
-                image,
-                tooltip,
-                menu=self.create_menu()
-            )
 
             # Stop any existing icon thread first
             if self.icon_thread and self.icon_thread.is_alive():
@@ -277,22 +305,36 @@ class TrayService:
                 # We don't want to wait forever
                 self.icon_thread.join(timeout=2.0)
 
+            # Create the icon completely fresh
+            self.icon = pystray.Icon(
+                "Dictate",
+                image,
+                tooltip,
+                menu=self.create_menu()
+            )
+
             # Create new thread for the icon
             self.icon_thread = threading.Thread(target=self.run_icon, daemon=True)
             self.icon_thread.start()
             logging.info(f"Created new icon with tooltip: {tooltip}")
         except Exception as e:
             logging.error(f"Error creating icon: {e}")
+            # Schedule a retry after delay
+            threading.Timer(2.0, lambda: self.create_icon(image_path, tooltip)).start()
 
     def run_icon(self):
         """Run the icon in a way that catches errors"""
         try:
             if self.icon:
                 self.icon.run()
+                logging.info("Icon thread exiting normally")
         except Exception as e:
             logging.error(f"Error in icon thread: {e}")
-            # Schedule recreation of the icon
-            threading.Timer(1.0, lambda: self.recreate_icon()).start()
+        finally:
+            # When icon thread exits for any reason, recreate after delay unless we're shutting down
+            if self.running:
+                logging.info("Scheduling icon recreation from run_icon")
+                threading.Timer(1.0, lambda: self.recreate_icon()).start()
 
     def recreate_icon(self, image_path=None, tooltip=None):
         """Recreate the icon from scratch"""
@@ -309,6 +351,8 @@ class TrayService:
                     image_path = "/usr/local/bin/hollow-circle.png"
                     tooltip = "Idle"
 
+            logging.info(f"Recreating icon with state: {self.icon_state}")
+
             # Stop the existing icon if it exists
             if self.icon:
                 try:
@@ -317,8 +361,18 @@ class TrayService:
                     logging.error(f"Error stopping existing icon: {e}")
                 self.icon = None
 
-            # Create a new icon after a short delay
-            threading.Timer(0.5, lambda: self.create_icon(image_path, tooltip)).start()
+            # Don't start a new icon creation if we're shutting down
+            if not self.running:
+                return
+
+            # Create a new icon after a short delay - helps prevent race conditions
+            def delayed_creation():
+                if self.running:  # Check again in case we're shutting down
+                    with self.icon_lock:
+                        if self.icon is None:  # Only create if still needed
+                            self.create_icon(image_path, tooltip)
+
+            threading.Timer(0.5, delayed_creation).start()
 
     def show_recording_icon(self):
         self.icon_state = "recording"
@@ -354,11 +408,7 @@ class TrayService:
                 try:
                     conn, addr = server.accept()
                 except socket.timeout:
-                    # Check if icon is still valid and recreate if needed
-                    with self.icon_lock:
-                        if self.icon and not self.icon_thread.is_alive():
-                            logging.warning("Icon thread died, recreating...")
-                            self.recreate_icon()
+                    # Periodic health check handled by watchdog thread
                     continue
 
                 try:
