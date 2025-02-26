@@ -8,6 +8,7 @@ import pystray
 from PIL import Image
 import threading
 import logging
+import time
 from config_manager import ConfigManager
 import subprocess
 
@@ -17,7 +18,10 @@ class TrayService:
     def __init__(self):
         self.icon = None
         self.running = True
+        self.icon_state = "idle"  # Track the current icon state
         self.config_manager = ConfigManager()
+        self.icon_thread = None
+        self.icon_lock = threading.Lock()  # Protect icon operations
 
     def show_config_window(self):
         """Launch the configuration dialog"""
@@ -36,6 +40,21 @@ class TrayService:
         subprocess.run(['dictation', 'config', '--device', str(device_id)])
         # Update config cache and refresh menu to show the new selection
         self.config_manager.load_config()  # Reload config
+        self.refresh_menu()
+
+    def restart_daemon(self):
+        """Restart the dictation daemon"""
+        try:
+            subprocess.run(['systemctl', '--user', 'restart', 'dictation'])
+            logging.info("Dictation daemon restart requested")
+            time.sleep(2)  # Give time for daemon to restart
+            self.refresh_menu()
+        except Exception as e:
+            logging.error(f"Error restarting daemon: {e}")
+
+    def test_daemon_connection(self):
+        """Test connection to the daemon and refresh menu"""
+        self.get_audio_devices()
         self.refresh_menu()
 
     def get_audio_devices(self):
@@ -125,14 +144,19 @@ class TrayService:
             logging.error("This is likely a programming error rather than a connection issue")
             return []
 
-
     def refresh_menu(self):
         """Refresh the menu to update device list"""
-        if self.icon:
-            self.icon.menu = self.create_menu()
-            # Force menu update in pystray
-            if hasattr(self.icon, '_update_menu'):
-                self.icon._update_menu()
+        with self.icon_lock:
+            if self.icon:
+                try:
+                    self.icon.menu = self.create_menu()
+                    # Force menu update in pystray
+                    if hasattr(self.icon, '_update_menu'):
+                        self.icon._update_menu()
+                except Exception as e:
+                    logging.error(f"Error refreshing menu: {e}")
+                    # If refresh fails, try to recreate the icon
+                    self.recreate_icon()
 
     def create_menu(self):
         """Create the system tray context menu with fallback options"""
@@ -156,8 +180,6 @@ class TrayService:
                            checked=lambda item: config.get('model') == "large")
         )
 
-
-
         # Create dynamic submenu for audio devices
         devices = []
         max_retries = 4
@@ -173,11 +195,9 @@ class TrayService:
                 logging.warning(f"No devices found on attempt {attempt+1}")
                 if attempt < max_retries - 1:
                     logging.info(f"Retrying in {retry_delay} seconds...")
-                    import time
                     time.sleep(retry_delay)
                 else:
                     logging.error("All attempts to get audio devices failed")
-
 
         device_items = []
         current_device_id = config.get('audio_device')
@@ -209,39 +229,111 @@ class TrayService:
             pystray.MenuItem("Quit", self.quit_application)
         )
 
-
     def quit_application(self):
         """Quit the application"""
-        if self.icon:
-            self.icon.stop()
         self.running = False
+        with self.icon_lock:
+            if self.icon:
+                try:
+                    self.icon.stop()
+                except Exception as e:
+                    logging.error(f"Error stopping icon: {e}")
+                self.icon = None
         sys.exit(0)
 
     def update_icon(self, image_path, tooltip):
         """Common method to update or create the icon"""
-        image = Image.open(image_path)
-        if self.icon:
-            self.icon.icon = image
-            self.icon.title = tooltip  # Update tooltip as well
-        else:
+        with self.icon_lock:
+            try:
+                image = Image.open(image_path)
+                if self.icon:
+                    try:
+                        self.icon.icon = image
+                        self.icon.title = tooltip  # Update tooltip as well
+                    except Exception as e:
+                        logging.error(f"Error updating icon: {e}")
+                        self.recreate_icon(image_path, tooltip)
+                else:
+                    self.create_icon(image_path, tooltip)
+            except Exception as e:
+                logging.error(f"Error in update_icon: {e}")
+                # Fall back to recreating the icon
+                self.recreate_icon(image_path, tooltip)
+
+    def create_icon(self, image_path, tooltip):
+        """Create a new systray icon"""
+        try:
+            image = Image.open(image_path)
             self.icon = pystray.Icon(
                 "Dictate",
                 image,
                 tooltip,
                 menu=self.create_menu()
             )
-            threading.Thread(target=self.icon.run, daemon=True).start()
+
+            # Stop any existing icon thread first
+            if self.icon_thread and self.icon_thread.is_alive():
+                logging.info("Waiting for previous icon thread to complete...")
+                # We don't want to wait forever
+                self.icon_thread.join(timeout=2.0)
+
+            # Create new thread for the icon
+            self.icon_thread = threading.Thread(target=self.run_icon, daemon=True)
+            self.icon_thread.start()
+            logging.info(f"Created new icon with tooltip: {tooltip}")
+        except Exception as e:
+            logging.error(f"Error creating icon: {e}")
+
+    def run_icon(self):
+        """Run the icon in a way that catches errors"""
+        try:
+            if self.icon:
+                self.icon.run()
+        except Exception as e:
+            logging.error(f"Error in icon thread: {e}")
+            # Schedule recreation of the icon
+            threading.Timer(1.0, lambda: self.recreate_icon()).start()
+
+    def recreate_icon(self, image_path=None, tooltip=None):
+        """Recreate the icon from scratch"""
+        with self.icon_lock:
+            # Use current state if not specified
+            if image_path is None:
+                if self.icon_state == "recording":
+                    image_path = "/usr/local/bin/red-circle.png"
+                    tooltip = "Recording..."
+                elif self.icon_state == "processing":
+                    image_path = "/usr/local/bin/grey-circle.png"
+                    tooltip = "Processing..."
+                else:  # idle
+                    image_path = "/usr/local/bin/hollow-circle.png"
+                    tooltip = "Idle"
+
+            # Stop the existing icon if it exists
+            if self.icon:
+                try:
+                    self.icon.stop()
+                except Exception as e:
+                    logging.error(f"Error stopping existing icon: {e}")
+                self.icon = None
+
+            # Create a new icon after a short delay
+            threading.Timer(0.5, lambda: self.create_icon(image_path, tooltip)).start()
 
     def show_recording_icon(self):
+        self.icon_state = "recording"
         self.update_icon("/usr/local/bin/red-circle.png", "Recording...")
 
     def show_decoding_icon(self):
+        self.icon_state = "processing"
         self.update_icon("/usr/local/bin/grey-circle.png", "Processing...")
 
     def show_idle_icon(self):
+        self.icon_state = "idle"
         self.update_icon("/usr/local/bin/hollow-circle.png", "Idle")
 
     def start(self):
+        # Set up the socket for receiving commands
         try:
             os.unlink(SOCKET_PATH)
         except OSError:
@@ -250,37 +342,73 @@ class TrayService:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(SOCKET_PATH)
         os.chmod(SOCKET_PATH, 0o666)
+        server.settimeout(5.0)  # Add timeout to accept() to allow periodic checks
         server.listen(1)
+
         self.show_idle_icon()
         logging.info("Starting with idle icon")
 
         while self.running:
-            conn, addr = server.accept()
             try:
-                command = conn.recv(1024).decode('utf-8').strip()
-                logging.info(f"Received command: {command}")
+                # Accept connections with timeout to allow checking icon state periodically
+                try:
+                    conn, addr = server.accept()
+                except socket.timeout:
+                    # Check if icon is still valid and recreate if needed
+                    with self.icon_lock:
+                        if self.icon and not self.icon_thread.is_alive():
+                            logging.warning("Icon thread died, recreating...")
+                            self.recreate_icon()
+                    continue
 
-                if command == "RECORDING_STARTED":
-                    logging.info("Switching to recording icon")
-                    self.show_recording_icon()
-                elif command == "RECORDING_STOPPED":
-                    logging.info("Switching to decoding icon")
-                    self.show_decoding_icon()
-                elif command.startswith("PROCESSED"):
-                    logging.info("Switching to idle icon")
-                    self.show_idle_icon()
-                elif command == "CONFIG_CHANGED":
-                    logging.info("Configuration changed, refreshing menu")
-                    self.config_manager.load_config()  # Reload config
-                    self.refresh_menu()
-                elif command == "QUIT":
-                    logging.info("Quitting application")
-                    self.quit_application()
-                conn.send("OK".encode('utf-8'))
+                try:
+                    command = conn.recv(1024).decode('utf-8').strip()
+                    logging.info(f"Received command: {command}")
+
+                    if command == "RECORDING_STARTED":
+                        logging.info("Switching to recording icon")
+                        self.show_recording_icon()
+                    elif command == "RECORDING_STOPPED":
+                        logging.info("Switching to decoding icon")
+                        self.show_decoding_icon()
+                    elif command.startswith("PROCESSED"):
+                        logging.info("Switching to idle icon")
+                        self.show_idle_icon()
+                    elif command == "CONFIG_CHANGED":
+                        logging.info("Configuration changed, refreshing menu")
+                        self.config_manager.load_config()  # Reload config
+                        self.refresh_menu()
+                    elif command == "QUIT":
+                        logging.info("Quitting application")
+                        self.quit_application()
+
+                    try:
+                        # Send response and handle possible broken pipe
+                        conn.send("OK".encode('utf-8'))
+                    except BrokenPipeError:
+                        logging.warning("Broken pipe when responding to client")
+                    except Exception as e:
+                        logging.error(f"Error sending response: {e}")
+
+                except Exception as e:
+                    logging.error(f"Error handling command: {e}")
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
             except Exception as e:
-                logging.error(f"Error handling command: {e}")
-            finally:
-                conn.close()
+                logging.error(f"Error in main loop: {e}")
+                # Brief pause to avoid tight loop if there's a persistent error
+                time.sleep(0.5)
+
+        # Cleanup before exit
+        try:
+            server.close()
+            os.unlink(SOCKET_PATH)
+        except:
+            pass
 
 
 if __name__ == "__main__":
