@@ -92,14 +92,21 @@ def main():
     config_parser = subparsers.add_parser('config', help='Configure dictation settings')
     config_parser.add_argument('--hotkey', help='Set the activation hotkey')
     config_parser.add_argument('--device', type=int, help='Set the audio input device ID')
-    config_parser.add_argument('--model', help='Set the Whisper model (tiny/base/small/medium/large)')
+    config_parser.add_argument('--model', help='Set the Whisper model (tiny/base/small/medium/large-v3-turbo/distil-small.en/etc)')
     config_parser.add_argument('--list-devices', action='store_true', help='List available audio devices')
     config_parser.add_argument('--show', action='store_true', help='Show current configuration')
+
+    # Discard subcommand
+    subparsers.add_parser('discard', help='Discard current recording without transcribing')
 
     args = parser.parse_args()
 
     if args.command == 'config':
         handle_config(args)
+    elif args.command == 'discard':
+        response = send_daemon_command('DISCARD')
+        if response:
+            print(response)
     else:
         # Default behavior (toggle recording)
         toggle_recording()
