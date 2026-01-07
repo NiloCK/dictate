@@ -77,7 +77,7 @@ journalctl -u dictation -f
 
 ## Configuration
 
-The system uses Whisper's "base" model by default. You can modify `dictation_daemon.py` to use different models:
+The system uses Whisper's "base" model by default. You can modify `dictation_daemon.py` or use the tray menu to use different models (e.g., `distil-small.en`, `large-v3-turbo`).
 
 ## Troubleshooting
 
@@ -113,7 +113,7 @@ sudo bash ./installation.sh && sudo journalctl -u dictation -f
 
 ## Dependencies
 
-- openai-whisper
+- faster-whisper
 - sounddevice
 - numpy
 - torch

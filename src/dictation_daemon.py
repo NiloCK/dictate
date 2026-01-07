@@ -3,13 +3,12 @@
 
 import sys
 import subprocess
-import whisper
+from faster_whisper import WhisperModel
 import sounddevice as sd
 import numpy as np
 import threading
 import time
 import queue
-import torch
 import os
 import socket
 import threading
@@ -167,26 +166,21 @@ class AudioDeviceHandler:
 
 
 def download_model(model_name):
-    """Download the model before starting the system"""
-    logging.info(f"Downloading model: {model_name}")
-    whisper_cache = os.path.join('/var/cache', 'whisper')
-
-    # Ensure cache directory exists
-    os.makedirs(whisper_cache, exist_ok=True)
-
+    """Download/Load the model using faster-whisper"""
+    logging.info(f"Loading faster-whisper model: {model_name}")
+    # faster-whisper stores models in a specific cache, usually ~/.cache/huggingface/hub
+    # We can rely on its default caching or specify download_root.
+    # The original code used /var/cache/whisper. faster-whisper doesn't use the same format.
+    # We will let faster-whisper manage its own cache for now, or use the standard HF cache.
+    
     try:
-        model = whisper.load_model(model_name, download_root=whisper_cache, device=None)
+        # device="auto" checks for CUDA/ROCM, else CPU
+        # compute_type="int8" is efficient for CPU and supported on GPU
+        model = WhisperModel(model_name, device="auto", compute_type="int8")
         logging.info("Model loaded successfully!")
         return model
-    except RuntimeError as e:
-        logging.error(f"Error loading model: {e}")
-        logging.info("Attempting to download model...")
-        raise
-    except KeyboardInterrupt:
-        logging.info("\nModel download interrupted. Please try again.")
-        sys.exit(1)
     except Exception as e:
-        logging.error(f"Unexpected error downloading model: {e}", exc_info=True)
+        logging.error(f"Error loading model: {e}", exc_info=True)
         raise
 
 
@@ -328,9 +322,14 @@ class DictationSystem:
                 logging.info(f"Resampled audio shape: {audio.shape}")
 
             # Use Whisper to transcribe
-            result = self.model.transcribe(audio, language="en")
-            text = result["text"].strip()
-            logging.info(f"Transcription result: {result}")
+            # faster-whisper returns a tuple (segments, info)
+            segments, info = self.model.transcribe(audio, language="en", beam_size=5)
+            
+            # Combine segments into a single string
+            text_segments = [segment.text for segment in segments]
+            text = " ".join(text_segments).strip()
+            
+            logging.info(f"Transcription result: {text}")
             return text
 
         except Exception as e:
@@ -355,10 +354,35 @@ class DictationSystem:
             except Exception as e:
                 logging.error(f"Unexpected error typing text: {e}", exc_info=True)
 
+    def handle_discard(self):
+        logging.info("Received DISCARD command")
+        if self.recording:
+            self.recording = False
+            if self.recording_thread:
+                self.recording_thread.join()
+            
+            # Clear data
+            self.audio_data = []
+            self.audio_queue.queue.clear()
+            
+            # Notify tray to go back to idle
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as tray_sock:
+                    tray_sock.connect(TRAY_SOCKET_PATH)
+                    tray_sock.send("PROCESSED".encode('utf-8'))
+            except Exception as e:
+                logging.error(f"Failed to notify tray service: {e}")
+                
+            return "RECORDING_DISCARDED"
+        else:
+            return "NOT_RECORDING"
+
     def handle_command(self, command):
         """Handle various commands from the client"""
         if command == "TOGGLE":
             return self.handle_toggle()
+        elif command == "DISCARD":
+            return self.handle_discard()
         elif command == "LIST_DEVICES":
             return self.handle_list_devices()
         elif command == "RELOAD_CONFIG":
