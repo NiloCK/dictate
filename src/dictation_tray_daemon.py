@@ -34,7 +34,17 @@ class TrayService:
 
     def set_model(self, model_name):
         """Change the Whisper model"""
-        subprocess.run(['dictation', 'config', '--model', model_name])
+        logging.info(f"Setting model to: {model_name}")
+        try:
+            result = subprocess.run(['/usr/local/bin/dictation', 'config', '--model', model_name], 
+                                  capture_output=True, 
+                                  text=True)
+            if result.returncode == 0:
+                logging.info(f"Model set successfully. Output: {result.stdout}")
+            else:
+                logging.error(f"Failed to set model. Error: {result.stderr}")
+        except Exception as e:
+            logging.error(f"Error executing dictation command: {e}")
 
     def list_audio_devices(self):
         """Show audio devices dialog"""
@@ -42,10 +52,27 @@ class TrayService:
 
     def set_audio_device(self, device_id):
         """Set the audio input device"""
-        subprocess.run(['dictation', 'config', '--device', str(device_id)])
+        logging.info(f"Setting audio device to: {device_id}")
+        try:
+            result = subprocess.run(['/usr/local/bin/dictation', 'config', '--device', str(device_id)],
+                                  capture_output=True,
+                                  text=True)
+            if result.returncode != 0:
+                logging.error(f"Failed to set audio device: {result.stderr}")
+        except Exception as e:
+            logging.error(f"Error setting audio device: {e}")
+            
         # Update config cache and refresh menu to show the new selection
         self.config_manager.load_config()  # Reload config
         self.refresh_menu()
+
+    def discard_recording(self):
+        """Discard the current recording"""
+        logging.info("Discarding recording via tray")
+        try:
+            subprocess.run(['/usr/local/bin/dictation', 'discard'], capture_output=True)
+        except Exception as e:
+            logging.error(f"Error discarding recording: {e}")
 
     def restart_daemon(self):
         """Restart the dictation daemon"""
@@ -173,16 +200,20 @@ class TrayService:
 
         # Create submenu for model selection
         model_menu = pystray.Menu(
-            pystray.MenuItem("tiny", lambda: self.set_model("tiny"),
+            pystray.MenuItem("OpenAI Tiny (Fastest, ~150MB)", lambda: self.set_model("tiny"),
                            checked=lambda item: config.get('model') == "tiny"),
-            pystray.MenuItem("base", lambda: self.set_model("base"),
+            pystray.MenuItem("OpenAI Base (Default, ~200MB)", lambda: self.set_model("base"),
                            checked=lambda item: config.get('model') == "base"),
-            pystray.MenuItem("small", lambda: self.set_model("small"),
+            pystray.MenuItem("OpenAI Small (Balanced, ~500MB)", lambda: self.set_model("small"),
                            checked=lambda item: config.get('model') == "small"),
-            pystray.MenuItem("medium", lambda: self.set_model("medium"),
+            pystray.MenuItem("OpenAI Medium (High Acc, ~1.5GB)", lambda: self.set_model("medium"),
                            checked=lambda item: config.get('model') == "medium"),
-            pystray.MenuItem("large", lambda: self.set_model("large"),
-                           checked=lambda item: config.get('model') == "large")
+            pystray.MenuItem("OpenAI Large-v3-Turbo (Best Acc, ~1.6GB)", lambda: self.set_model("large-v3-turbo"),
+                           checked=lambda item: config.get('model') == "large-v3-turbo"),
+            pystray.MenuItem("Distil-Whisper Small (Fast, English, ~350MB)", lambda: self.set_model("distil-small.en"),
+                           checked=lambda item: config.get('model') == "distil-small.en"),
+            pystray.MenuItem("Distil-Whisper Medium (Acc, English, ~750MB)", lambda: self.set_model("distil-medium.en"),
+                           checked=lambda item: config.get('model') == "distil-medium.en")
         )
 
         # Create dynamic submenu for audio devices
@@ -227,6 +258,7 @@ class TrayService:
 
         return pystray.Menu(
             pystray.MenuItem("Configuration", self.show_config_window),
+            pystray.MenuItem("Discard Recording", lambda: self.discard_recording()),
             pystray.MenuItem("Model", model_menu),
             pystray.MenuItem("Audio Devices", device_menu),
             pystray.MenuItem("Refresh Devices", lambda: self.refresh_menu()),
