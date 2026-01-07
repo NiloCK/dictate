@@ -1,31 +1,32 @@
 # Dictate
 
-A Linux-based voice dictation system using OpenAI's Whisper model for speech-to-text conversion and automatic text input.
+Linux voice dictation system using `faster-whisper` (CTranslate2) for local speech-to-text conversion and automatic text input.
 
 ## Overview
 
 This system provides real-time voice dictation capabilities by:
-- Recording audio from your system's microphone
-- Converting speech to text using Whisper
-- Automatically typing the recognized text using ydotool
+- Recording audio from your system's microphone.
+- Converting speech to text using highly optimized local models (OpenAI Whisper & Distil-Whisper).
+- Automatically typing the recognized text into any application using `pynput` (with `ydotool` fallback).
+- Supporting multilingual dictation and translation (e.g., speak French -> type English).
+
+## Features
+
+- **Fast:** Uses `faster-whisper` backend with 8-bit quantization for <1s latency on modern CPUs.
+- **SOTA Models:** Supports `large-v3-turbo`, `distil-whisper`, and standard OpenAI models.
+- **System Tray Control:** Switch models, languages, and tasks (transcribe/translate) instantly from the tray.
+- **Smart Typing:** Robust text injection handling Unicode characters (accents, emojis).
+- **Audio Management:** "Discard Recording" feature to cancel bad takes.
 
 ## Prerequisites
 
-- Linux system with systemd
+- Linux system with `systemd`
 - Python 3.x
 - Root access for installation
-- microphone
-- ydotool installed
+- Microphone
+- `ydotool` (installed automatically by script)
 
 ## Installation
-
-Either:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/nilock/dictate/main/remote_install.sh | bash
-```
-
-Or:
 
 1. Clone this repository:
 ```bash
@@ -39,91 +40,63 @@ sudo ./installation.sh
 ```
 
 This will:
+- Install system dependencies (`ydotool`, `portaudio`, etc.)
 - Create a Python virtual environment in `/opt/dictation_venv`
-- Install required Python packages
-- Set up the dictation service
-- Start the service automatically
+- Set up the background daemon (`dictation.service`) and tray app (`dictation_tray.service`)
+- Configure permissions for `ydotool` (socket access)
 
 ## Usage
 
-1. Start/stop dictation using the provided script:
-```bash
-dictation.sh
-```
+### Dictation
+1. **Trigger:** Run `dictation` (or bind it to a hotkey like `Ctrl+Alt+D`).
+2. **Speak:** The tray icon turns **Red**.
+3. **Stop:** Run `dictation` again. The tray icon turns **Grey** (processing), then types the text.
 
-It is useful to set up a system hot-key to point to this script at its installation destination: `/usr/local/bin/dictation.sh`
+### Control
+- **Tray Menu:** Right-click the system tray icon to:
+    - **Discard Recording:** Cancel the current audio without typing.
+    - **Model:** Select between speed (`tiny`, `distil-small.en`) and accuracy (`large-v3-turbo`).
+    - **Language:** Force English (`en`), French (`fr`), or Auto-Detect.
+    - **Task:** Choose **Transcribe** (Input Language -> Input Language) or **Translate** (Input Language -> English).
+- **CLI:** You can also control it via terminal:
+  ```bash
+  dictation config --model large-v3-turbo
+  dictation config --language fr --task translate
+  dictation discard
+  ```
 
-2. When activated:
-   - Speak
-   - Run the command again to stop recording
-   - The recognized text will be automatically typed at your cursor position
-
-3. Check service status:
-```bash
-systemctl status dictation
-```
-
-4. View logs:
-```bash
-journalctl -u dictation -f
-```
-
-## Components
-
-- `dictation_daemon.py`: Background service handling audio recording and transcription
-- `dictation_client.py`: Client interface for sending commands to the daemon
-- `dictation.sh`: Convenient shell script wrapper
-- `installation.sh`: System setup and service installation
-
-## Configuration
-
-The system uses Whisper's "base" model by default. You can modify `dictation_daemon.py` or use the tray menu to use different models (e.g., `distil-small.en`, `large-v3-turbo`).
+### Hotkey Setup
+Bind the command `/usr/local/bin/dictation` to a custom keyboard shortcut in your desktop environment (GNOME, KDE, i3, etc.).
 
 ## Troubleshooting
 
-1. Check service status:
-```bash
-systemctl status dictation
-```
+1. **Check Status:**
+   ```bash
+   systemctl status dictation
+   systemctl --user status dictation_tray
+   ```
 
-2. Review logs:
-```bash
-tail -f /tmp/dictation_daemon.log
-```
+2. **View Logs:**
+   - Daemon (Recording/Transcribing): `tail -f /tmp/dictation_daemon.log`
+   - Tray (Typing/UI): `journalctl --user -u dictation_tray -f`
 
-3. Test audio recording:
-```bash
-python3 dictation_script_only.py
-```
+3. **Typing Issues:**
+   If text appears as numbers or gibberish (e.g. `fran242...`), ensure `ydotool` is working or try restarting the tray service to re-attempt `pynput` connection.
 
-## Debug Files
+## Configuration
 
-The system saves the last recording as `/tmp/last_recording.wav` for debugging purposes.
-
-## Development
-
-A standalone testing script (`dictation_script_only.py`) is provided for development and testing purposes.
-
-The following is useful to redeploy locally:
-
-```bash
-sudo bash ./installation.sh && sudo journalctl -u dictation -f
-```
-
+Configuration is stored in `~/.config/dictation/config.json`.
+You can edit this manually or use the CLI/Tray to update it.
 
 ## Dependencies
 
-- faster-whisper
-- sounddevice
-- numpy
-- torch
-- scipy
-- pynput
+- `faster-whisper`
+- `sounddevice`
+- `numpy`
+- `pynput`
+- `pystray`
+- `ydotool` (System package)
 
 ## License
 
 GPL-3.0
-
-## Contributing
-
-Sure, go nuts.
