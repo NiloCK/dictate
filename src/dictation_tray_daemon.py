@@ -11,12 +11,26 @@ import logging
 import time
 from config_manager import ConfigManager
 import subprocess
+try:
+    from pynput.keyboard import Controller
+    PYNPUT_AVAILABLE = True
+except ImportError:
+    PYNPUT_AVAILABLE = False
+except Exception:
+    PYNPUT_AVAILABLE = False
 
 SOCKET_PATH = '/tmp/dictation_tray.sock'
 
 class TrayService:
     def __init__(self):
         self.icon = None
+        if PYNPUT_AVAILABLE:
+            try:
+                self.keyboard = Controller()
+            except Exception:
+                self.keyboard = None
+        else:
+            self.keyboard = None
         self.running = True
         self.icon_state = "idle"  # Track the current icon state
         self.config_manager = ConfigManager()
@@ -34,7 +48,40 @@ class TrayService:
 
     def set_model(self, model_name):
         """Change the Whisper model"""
-        subprocess.run(['dictation', 'config', '--model', model_name])
+        logging.info(f"Setting model to: {model_name}")
+        try:
+            result = subprocess.run(['/usr/local/bin/dictation', 'config', '--model', model_name], 
+                                  capture_output=True, 
+                                  text=True)
+            if result.returncode == 0:
+                logging.info(f"Model set successfully. Output: {result.stdout}")
+            else:
+                logging.error(f"Failed to set model. Error: {result.stderr}")
+        except Exception as e:
+            logging.error(f"Error executing dictation command: {e}")
+        # Refresh menu to update checkmarks
+        self.config_manager.load_config()
+        self.refresh_menu()
+
+    def set_language(self, language):
+        """Change the language"""
+        logging.info(f"Setting language to: {language}")
+        try:
+            subprocess.run(['/usr/local/bin/dictation', 'config', '--language', language], capture_output=True)
+        except Exception as e:
+            logging.error(f"Error setting language: {e}")
+        self.config_manager.load_config()
+        self.refresh_menu()
+
+    def set_task(self, task):
+        """Change the task"""
+        logging.info(f"Setting task to: {task}")
+        try:
+            subprocess.run(['/usr/local/bin/dictation', 'config', '--task', task], capture_output=True)
+        except Exception as e:
+            logging.error(f"Error setting task: {e}")
+        self.config_manager.load_config()
+        self.refresh_menu()
 
     def list_audio_devices(self):
         """Show audio devices dialog"""
@@ -42,10 +89,27 @@ class TrayService:
 
     def set_audio_device(self, device_id):
         """Set the audio input device"""
-        subprocess.run(['dictation', 'config', '--device', str(device_id)])
+        logging.info(f"Setting audio device to: {device_id}")
+        try:
+            result = subprocess.run(['/usr/local/bin/dictation', 'config', '--device', str(device_id)],
+                                  capture_output=True,
+                                  text=True)
+            if result.returncode != 0:
+                logging.error(f"Failed to set audio device: {result.stderr}")
+        except Exception as e:
+            logging.error(f"Error setting audio device: {e}")
+            
         # Update config cache and refresh menu to show the new selection
         self.config_manager.load_config()  # Reload config
         self.refresh_menu()
+
+    def discard_recording(self):
+        """Discard the current recording"""
+        logging.info("Discarding recording via tray")
+        try:
+            subprocess.run(['/usr/local/bin/dictation', 'discard'], capture_output=True)
+        except Exception as e:
+            logging.error(f"Error discarding recording: {e}")
 
     def restart_daemon(self):
         """Restart the dictation daemon"""
@@ -173,16 +237,40 @@ class TrayService:
 
         # Create submenu for model selection
         model_menu = pystray.Menu(
-            pystray.MenuItem("tiny", lambda: self.set_model("tiny"),
+            pystray.MenuItem("OpenAI Tiny (Fastest, ~150MB)", lambda: self.set_model("tiny"),
                            checked=lambda item: config.get('model') == "tiny"),
-            pystray.MenuItem("base", lambda: self.set_model("base"),
+            pystray.MenuItem("OpenAI Base (Default, ~200MB)", lambda: self.set_model("base"),
                            checked=lambda item: config.get('model') == "base"),
-            pystray.MenuItem("small", lambda: self.set_model("small"),
+            pystray.MenuItem("OpenAI Small (Balanced, ~500MB)", lambda: self.set_model("small"),
                            checked=lambda item: config.get('model') == "small"),
-            pystray.MenuItem("medium", lambda: self.set_model("medium"),
+            pystray.MenuItem("OpenAI Medium (High Acc, ~1.5GB)", lambda: self.set_model("medium"),
                            checked=lambda item: config.get('model') == "medium"),
-            pystray.MenuItem("large", lambda: self.set_model("large"),
-                           checked=lambda item: config.get('model') == "large")
+            pystray.MenuItem("OpenAI Large-v3-Turbo (Best Acc, ~1.6GB)", lambda: self.set_model("large-v3-turbo"),
+                           checked=lambda item: config.get('model') == "large-v3-turbo"),
+            pystray.MenuItem("Distil-Whisper Small (Fast, English, ~350MB)", lambda: self.set_model("distil-small.en"),
+                           checked=lambda item: config.get('model') == "distil-small.en"),
+            pystray.MenuItem("Distil-Whisper Medium (Acc, English, ~750MB)", lambda: self.set_model("distil-medium.en"),
+                           checked=lambda item: config.get('model') == "distil-medium.en")
+        )
+
+        # Create submenu for Language
+        current_lang = config.get('language', 'en')
+        language_menu = pystray.Menu(
+            pystray.MenuItem("Auto-Detect", lambda: self.set_language("auto"),
+                           checked=lambda item: current_lang == "auto"),
+            pystray.MenuItem("English (en)", lambda: self.set_language("en"),
+                           checked=lambda item: current_lang == "en"),
+            pystray.MenuItem("French (fr)", lambda: self.set_language("fr"),
+                           checked=lambda item: current_lang == "fr")
+        )
+
+        # Create submenu for Task
+        current_task = config.get('task', 'transcribe')
+        task_menu = pystray.Menu(
+            pystray.MenuItem("Transcribe (Speech -> Text)", lambda: self.set_task("transcribe"),
+                           checked=lambda item: current_task == "transcribe"),
+            pystray.MenuItem("Translate (Speech -> English Text)", lambda: self.set_task("translate"),
+                           checked=lambda item: current_task == "translate")
         )
 
         # Create dynamic submenu for audio devices
@@ -227,7 +315,10 @@ class TrayService:
 
         return pystray.Menu(
             pystray.MenuItem("Configuration", self.show_config_window),
+            pystray.MenuItem("Discard Recording", lambda: self.discard_recording()),
             pystray.MenuItem("Model", model_menu),
+            pystray.MenuItem("Language", language_menu),
+            pystray.MenuItem("Task", task_menu),
             pystray.MenuItem("Audio Devices", device_menu),
             pystray.MenuItem("Refresh Devices", lambda: self.refresh_menu()),
             pystray.MenuItem("Restart Daemon", lambda: self.restart_daemon()),
@@ -386,6 +477,59 @@ class TrayService:
         self.icon_state = "idle"
         self.update_icon("/usr/local/bin/hollow-circle.png", "Idle")
 
+    def type_text_robust(self, text):
+        """Type text using pynput if available, else fallback to ydotool with unicode support"""
+        if self.keyboard:
+            try:
+                logging.info("Typing with pynput")
+                self.keyboard.type(text)
+                self.keyboard.type(" ")
+                return
+            except Exception as e:
+                logging.error(f"Pynput failed: {e}")
+        
+        # Fallback to ydotool
+        logging.info("Falling back to ydotool")
+        try:
+            # Helper to type a chunk of text (ASCII only)
+            def type_chunk(chunk):
+                if not chunk: return
+                subprocess.run(['ydotool', 'type', '--key-delay', '4', f"{chunk}"],
+                             capture_output=True, text=True, check=True)
+
+            # Helper to type a single unicode character via Ctrl+Shift+u
+            def type_unicode(char):
+                # Standard Linux Unicode entry: Ctrl+Shift+u, hex, Enter
+                hex_code = f"{ord(char):x}"
+                # Ctrl+Shift+u (29=L_Ctrl, 42=L_Shift, 22=u)
+                subprocess.run(['ydotool', 'key', '29:1', '42:1', '22:1', '22:0', '42:0', '29:0'], check=True)
+                # Hex code
+                subprocess.run(['ydotool', 'type', '--key-delay', '2', hex_code], check=True)
+                # Enter
+                subprocess.run(['ydotool', 'key', '28:1', '28:0'], check=True)
+
+            # Split text into ASCII and non-ASCII chunks
+            current_chunk = ""
+            for char in text:
+                if char.isascii() and char.isprintable():
+                    current_chunk += char
+                else:
+                    # Flush current chunk
+                    type_chunk(current_chunk)
+                    current_chunk = ""
+                    # Type the unicode char
+                    type_unicode(char)
+            
+            # Flush remaining chunk
+            type_chunk(current_chunk)
+            
+            # Type a trailing space
+            type_chunk(" ")
+            
+        except Exception as e:
+            logging.error(f"ydotool fallback failed: {e}")
+
+
     def start(self):
         # Set up the socket for receiving commands
         try:
@@ -423,6 +567,12 @@ class TrayService:
                         self.show_decoding_icon()
                     elif command.startswith("PROCESSED"):
                         logging.info("Switching to idle icon")
+                        self.show_idle_icon()
+                    elif command.startswith("TYPE:"):
+                        text_to_type = command[5:] # Remove TYPE: prefix
+                        logging.info(f"Typing text: {text_to_type}")
+                        self.type_text_robust(text_to_type)
+                        # Ensure icon goes back to idle
                         self.show_idle_icon()
                     elif command == "CONFIG_CHANGED":
                         logging.info("Configuration changed, refreshing menu")

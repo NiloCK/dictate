@@ -44,6 +44,7 @@ rm -f /usr/local/bin/dictation_daemon.py
 rm -f /usr/local/bin/dictation_client.py
 rm -f /usr/local/bin/dictation_tray_daemon.py
 rm -f /usr/local/bin/dictation.sh
+rm -f /usr/local/bin/dictation
 rm -f /usr/local/bin/config_manager.py
 rm -f /etc/systemd/system/dictation.service
 rm -f /etc/systemd/system/dictation_tray.service
@@ -68,7 +69,7 @@ fi
 
 # Install system dependencies
 echo "Installing system dependencies..."
-apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool
+apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool ydotoold
 
 # Create virtual environment
 VENV_PATH="/opt/dictation_venv"
@@ -81,14 +82,14 @@ chown -R $ACTUAL_USER:$ACTUAL_USER "$VENV_PATH"
 # Install required python packages
 echo "Installing required Python packages..."
 sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install --upgrade pip
-sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch scipy pystray Pillow
+sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install faster-whisper sounddevice numpy torch scipy pystray Pillow pynput
 
 # Place files
 cp ./src/dictation_daemon.py /usr/local/bin/
 cp ./src/dictation_tray_daemon.py /usr/local/bin/
 cp ./src/dictation_client.py /usr/local/bin/
 cp ./src/config_manager.py /usr/local/bin/
-cp ./src/dictation.sh /usr/local/bin/
+cp ./src/dictation.sh /usr/local/bin/dictation
 cp ./red-circle.png /usr/local/bin/
 cp ./grey-circle.png /usr/local/bin/
 cp ./hollow-circle.png /usr/local/bin/
@@ -98,7 +99,7 @@ chmod +x /usr/local/bin/dictation_daemon.py
 chmod +x /usr/local/bin/dictation_tray_daemon.py
 chmod +x /usr/local/bin/config_manager.py
 chmod +x /usr/local/bin/dictation_client.py
-chmod +x /usr/local/bin/dictation.sh
+chmod +x /usr/local/bin/dictation
 
 # Set proper permissions for icons
 chmod 644 /usr/local/bin/red-circle.png
@@ -131,6 +132,28 @@ chown $ACTUAL_USER:$ACTUAL_USER /var/cache/whisper
 # Make sure the socket directory is accessible
 chmod 1777 /tmp
 
+# Ensure ydotool daemon is running and accessible
+echo "Configuring ydotool..."
+# Kill any existing user instances to be clean
+killall ydotoold 2>/dev/null
+
+# Start system-wide ydotoold if not running via systemd
+if ! pgrep -x "ydotoold" > /dev/null; then
+    echo "Starting ydotoold in background..."
+    # Launch ydotoold as a background process
+    ydotoold &
+    # Give it a moment to create the socket
+    sleep 2
+fi
+
+# Set permissions on the ydotool socket so the user can write to it
+if [ -e "/tmp/.ydotool_socket" ]; then
+    chmod 666 /tmp/.ydotool_socket
+    echo "ydotool socket permissions set."
+else
+    echo "WARNING: ydotool socket not found at /tmp/.ydotool_socket"
+fi
+
 # Install systemd services
 cat > /etc/systemd/system/dictation.service << EOL
 [Unit]
@@ -141,6 +164,7 @@ After=network.target
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_daemon.py
 Environment=HOME=/root
 Environment=XDG_CACHE_HOME=/var/cache/whisper
+Environment=XDG_CONFIG_HOME=/home/$ACTUAL_USER/.config
 User=root
 Group=root
 Restart=always
@@ -163,6 +187,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_tray_daemon.py
+Environment=DISPLAY=:0
 Restart=on-failure
 RestartSec=3
 WorkingDirectory=/usr/local/bin
@@ -175,7 +200,6 @@ chown -R $ACTUAL_USER:$ACTUAL_USER /home/$ACTUAL_USER/.config/systemd/
 
 # Set permissions for service files
 chmod 644 /etc/systemd/system/dictation.service
-chmod 644 /etc/systemd/system/dictation_tray.service
 
 # Register and run the services
 echo "Enabling and starting dictation services..."
