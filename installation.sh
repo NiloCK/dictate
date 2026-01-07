@@ -69,7 +69,7 @@ fi
 
 # Install system dependencies
 echo "Installing system dependencies..."
-apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool
+apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool ydotoold
 
 # Create virtual environment
 VENV_PATH="/opt/dictation_venv"
@@ -82,7 +82,7 @@ chown -R $ACTUAL_USER:$ACTUAL_USER "$VENV_PATH"
 # Install required python packages
 echo "Installing required Python packages..."
 sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install --upgrade pip
-sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install faster-whisper sounddevice numpy torch scipy pystray Pillow
+sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install faster-whisper sounddevice numpy torch scipy pystray Pillow pynput
 
 # Place files
 cp ./src/dictation_daemon.py /usr/local/bin/
@@ -132,6 +132,28 @@ chown $ACTUAL_USER:$ACTUAL_USER /var/cache/whisper
 # Make sure the socket directory is accessible
 chmod 1777 /tmp
 
+# Ensure ydotool daemon is running and accessible
+echo "Configuring ydotool..."
+# Kill any existing user instances to be clean
+killall ydotoold 2>/dev/null
+
+# Start system-wide ydotoold if not running via systemd
+if ! pgrep -x "ydotoold" > /dev/null; then
+    echo "Starting ydotoold in background..."
+    # Launch ydotoold as a background process
+    ydotoold &
+    # Give it a moment to create the socket
+    sleep 2
+fi
+
+# Set permissions on the ydotool socket so the user can write to it
+if [ -e "/tmp/.ydotool_socket" ]; then
+    chmod 666 /tmp/.ydotool_socket
+    echo "ydotool socket permissions set."
+else
+    echo "WARNING: ydotool socket not found at /tmp/.ydotool_socket"
+fi
+
 # Install systemd services
 cat > /etc/systemd/system/dictation.service << EOL
 [Unit]
@@ -165,6 +187,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_tray_daemon.py
+Environment=DISPLAY=:0
 Restart=on-failure
 RestartSec=3
 WorkingDirectory=/usr/local/bin

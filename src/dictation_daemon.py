@@ -18,6 +18,7 @@ import sys
 import json
 from pathlib import Path
 from config_manager import ConfigManager
+# pynput removed - logic moved to tray
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -187,12 +188,6 @@ def download_model(model_name):
 class DictationSystem:
     def __init__(self):
         logging.info("Initializing DictationSystem")
-        # Check if ydotool is available
-        try:
-            subprocess.run(['ydotool', '--help'], capture_output=True, text=True)
-        except FileNotFoundError:
-            logging.warning("ydotool not found! Text typing functionality will not work.")
-            sys.exit(1)
         self.config = ConfigManager()
         self.load_configuration()
 
@@ -321,15 +316,34 @@ class DictationSystem:
                                         int(len(audio) * 16000 / self.sample_rate))
                 logging.info(f"Resampled audio shape: {audio.shape}")
 
+            # Get language and task from config
+            config_data = self.config.load_config()
+            language = config_data.get('language', 'en')
+            task = config_data.get('task', 'transcribe')
+            
+            # If language is 'auto', pass None to faster-whisper to enable detection
+            if language == 'auto':
+                language = None
+
+            logging.info(f"Transcribing with language={language}, task={task}")
+
             # Use Whisper to transcribe
             # faster-whisper returns a tuple (segments, info)
-            segments, info = self.model.transcribe(audio, language="en", beam_size=5)
+            segments, info = self.model.transcribe(
+                audio, 
+                language=language, 
+                task=task,
+                beam_size=5
+            )
             
             # Combine segments into a single string
             text_segments = [segment.text for segment in segments]
             text = " ".join(text_segments).strip()
             
             logging.info(f"Transcription result: {text}")
+            if info:
+                 logging.info(f"Detected language: {info.language} with probability {info.language_probability}")
+            
             return text
 
         except Exception as e:
@@ -337,22 +351,25 @@ class DictationSystem:
             return ""
 
     def type_text(self, text):
-        """Type the transcribed text using ydotool"""
-        if text:
-            logging.info(f"Attempting to type text: {text}")
-            try:
-                # Use subprocess instead of os.system to better handle errors
-                import subprocess
-                result = subprocess.run(['ydotool', 'type', '--key-delay', '4', f"{text} "],
-                                       capture_output=True, text=True, check=True)
-                logging.info("Text typed successfully")
-            except FileNotFoundError:
-                logging.error("ydotool command not found. Please install ydotool.")
-            except subprocess.CalledProcessError as e:
-                logging.error(f"Error typing text: {e}")
-                logging.error(f"Command output: {e.stderr}")
-            except Exception as e:
-                logging.error(f"Unexpected error typing text: {e}", exc_info=True)
+        """Send text to the tray daemon for typing"""
+        if not text:
+            return
+
+        logging.info(f"Sending text to tray for typing: {text}")
+        
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as tray_sock:
+                tray_sock.connect(TRAY_SOCKET_PATH)
+                # Send a TYPE command
+                message = f"TYPE:{text}"
+                tray_sock.send(message.encode('utf-8'))
+                
+            logging.info("Text sent to tray successfully")
+
+        except Exception as e:
+            logging.error(f"Error sending text to tray: {e}", exc_info=True)
+            # Fallback for headless or if tray is down? 
+            # We can try ydotool as a last resort backup, but let's rely on the tray for now.
 
     def handle_discard(self):
         logging.info("Received DISCARD command")

@@ -70,6 +70,10 @@ def handle_config(args):
         updates['audio_device'] = args.device
     if args.model:
         updates['model'] = args.model
+    if args.language:
+        updates['language'] = args.language
+    if args.task:
+        updates['task'] = args.task
 
     if updates:
         if config.update_config(**updates):
@@ -93,6 +97,8 @@ def main():
     config_parser.add_argument('--hotkey', help='Set the activation hotkey')
     config_parser.add_argument('--device', type=int, help='Set the audio input device ID')
     config_parser.add_argument('--model', help='Set the Whisper model (tiny/base/small/medium/large-v3-turbo/distil-small.en/etc)')
+    config_parser.add_argument('--language', help='Set the language (en, fr, auto, etc)')
+    config_parser.add_argument('--task', help='Set the task (transcribe, translate)')
     config_parser.add_argument('--list-devices', action='store_true', help='List available audio devices')
     config_parser.add_argument('--show', action='store_true', help='Show current configuration')
 
