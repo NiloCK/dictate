@@ -22,6 +22,7 @@ rm -f /usr/local/bin/dictation_daemon.py
 rm -f /usr/local/bin/dictation_client.py
 rm -f /usr/local/bin/dictation_tray_daemon.py
 rm -f /usr/local/bin/dictation.sh
+rm -f /usr/local/bin/dictation
 rm -f /usr/local/bin/red-circle.png
 rm -f /usr/local/bin/grey-circle.png
 

@@ -44,6 +44,7 @@ rm -f /usr/local/bin/dictation_daemon.py
 rm -f /usr/local/bin/dictation_client.py
 rm -f /usr/local/bin/dictation_tray_daemon.py
 rm -f /usr/local/bin/dictation.sh
+rm -f /usr/local/bin/dictation
 rm -f /usr/local/bin/config_manager.py
 rm -f /etc/systemd/system/dictation.service
 rm -f /etc/systemd/system/dictation_tray.service
@@ -81,14 +82,14 @@ chown -R $ACTUAL_USER:$ACTUAL_USER "$VENV_PATH"
 # Install required python packages
 echo "Installing required Python packages..."
 sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install --upgrade pip
-sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install openai-whisper sounddevice numpy torch scipy pystray Pillow
+sudo -u $ACTUAL_USER "$VENV_PATH/bin/pip" install faster-whisper sounddevice numpy torch scipy pystray Pillow
 
 # Place files
 cp ./src/dictation_daemon.py /usr/local/bin/
 cp ./src/dictation_tray_daemon.py /usr/local/bin/
 cp ./src/dictation_client.py /usr/local/bin/
 cp ./src/config_manager.py /usr/local/bin/
-cp ./src/dictation.sh /usr/local/bin/
+cp ./src/dictation.sh /usr/local/bin/dictation
 cp ./red-circle.png /usr/local/bin/
 cp ./grey-circle.png /usr/local/bin/
 cp ./hollow-circle.png /usr/local/bin/
@@ -98,7 +99,7 @@ chmod +x /usr/local/bin/dictation_daemon.py
 chmod +x /usr/local/bin/dictation_tray_daemon.py
 chmod +x /usr/local/bin/config_manager.py
 chmod +x /usr/local/bin/dictation_client.py
-chmod +x /usr/local/bin/dictation.sh
+chmod +x /usr/local/bin/dictation
 
 # Set proper permissions for icons
 chmod 644 /usr/local/bin/red-circle.png
@@ -141,6 +142,7 @@ After=network.target
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_daemon.py
 Environment=HOME=/root
 Environment=XDG_CACHE_HOME=/var/cache/whisper
+Environment=XDG_CONFIG_HOME=/home/$ACTUAL_USER/.config
 User=root
 Group=root
 Restart=always
@@ -175,7 +177,6 @@ chown -R $ACTUAL_USER:$ACTUAL_USER /home/$ACTUAL_USER/.config/systemd/
 
 # Set permissions for service files
 chmod 644 /etc/systemd/system/dictation.service
-chmod 644 /etc/systemd/system/dictation_tray.service
 
 # Register and run the services
 echo "Enabling and starting dictation services..."
