@@ -32,15 +32,33 @@ class TrayService:
         else:
             self.keyboard = None
         self.running = True
-        self.icon_state = "idle"  # Track the current icon state
+        self.icon_state = "idle"
         self.config_manager = ConfigManager()
         self.icon_thread = None
-        self.icon_lock = threading.Lock()  # Protect icon operations
-        self.last_icon_refresh = 0  # Time when icon was last refreshed
+        self.icon_lock = threading.Lock()
+        self.last_icon_refresh = 0
+        self.cached_devices = []
+        self.last_device_refresh = 0
+        
+        # Initial device fetch
+        threading.Thread(target=self.refresh_devices_background, daemon=True).start()
 
         # Add watchdog thread for icon health
         self.watchdog_thread = threading.Thread(target=self.icon_watchdog, daemon=True)
         self.watchdog_thread.start()
+
+    def refresh_devices_background(self):
+        """Fetch devices in the background to avoid hanging the UI"""
+        devices = self.get_audio_devices()
+        if devices:
+            self.cached_devices = devices
+            self.last_device_refresh = time.time()
+            # If the icon exists, nudge it to refresh the menu next time it's opened
+            if self.icon:
+                try:
+                    self.icon.menu = self.create_menu()
+                except Exception:
+                    pass
 
     def show_config_window(self):
         """Launch the configuration dialog"""
@@ -283,10 +301,12 @@ class TrayService:
         )
 
         # Create dynamic submenu for audio devices
-        # We only try once here to avoid blocking the UI thread during a click
-        devices = self.get_audio_devices()
-        if not devices:
-            logging.warning("No devices found during menu creation")
+        # Use cached devices to keep the UI snappy
+        devices = self.cached_devices
+        
+        # If cache is very old (over 30s) or empty, trigger a background refresh
+        if not devices or (time.time() - self.last_device_refresh > 30):
+            threading.Thread(target=self.refresh_devices_background, daemon=True).start()
 
         device_items = []
         current_device_id = config.get('audio_device')
@@ -371,9 +391,7 @@ class TrayService:
                 if self.icon:
                     try:
                         self.icon.icon = image
-                        self.icon.title = tooltip  # Update tooltip as well
-                        # On Wayland, forcing a menu refresh often nudges the shell to redraw the icon
-                        self.icon.menu = self.create_menu()
+                        self.icon.title = tooltip
                     except Exception as e:
                         logging.error(f"Error updating icon: {e}")
                         self.recreate_icon(image_path, tooltip)
