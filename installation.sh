@@ -141,16 +141,32 @@ echo "Configuring ydotool..."
 # Kill any existing user instances to be clean
 killall ydotoold 2>/dev/null
 
-# Start system-wide ydotoold if not running via systemd
-if ! pgrep -x "ydotoold" > /dev/null; then
-    echo "Starting ydotoold in background..."
-    # Launch ydotoold as a background process
-    ydotoold &
-    # Give it a moment to create the socket
-    sleep 2
-fi
+# Create a systemd service for ydotoold
+cat > /etc/systemd/system/ydotoold.service << EOL
+[Unit]
+Description=ydotoold - backend for ydotool
+After=network.target
 
-# Set permissions on the ydotool socket so the user can write to it
+[Service]
+Type=simple
+ExecStart=/usr/bin/ydotoold
+# Ensure the socket has correct permissions after starting
+ExecStartPost=/bin/sh -c 'sleep 1 && chmod 666 /tmp/.ydotool_socket'
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+systemctl daemon-reload
+systemctl enable ydotoold
+systemctl restart ydotoold
+
+# Give it a moment to create the socket
+sleep 2
+
+# Set permissions on the ydotool socket again just in case
 if [ -e "/tmp/.ydotool_socket" ]; then
     chmod 666 /tmp/.ydotool_socket
     echo "ydotool socket permissions set."
@@ -193,6 +209,7 @@ Type=simple
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_tray_daemon.py
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_SESSION_TYPE=wayland
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u $ACTUAL_USER)/bus
 Restart=on-failure
 RestartSec=3

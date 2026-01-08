@@ -344,7 +344,7 @@ class DictationSystem:
 
             # Use Whisper to transcribe
             # faster-whisper returns a tuple (segments, info)
-            segments, info = self.model.transcribe(
+            segments_gen, info = self.model.transcribe(
                 audio, 
                 language=language, 
                 task=task,
@@ -352,12 +352,21 @@ class DictationSystem:
             )
             
             # Combine segments into a single string
-            text_segments = [segment.text for segment in segments]
+            text_segments = []
+            for segment in segments_gen:
+                logging.debug(f"Segment: {segment.text}")
+                text_segments.append(segment.text)
+            
             text = " ".join(text_segments).strip()
             
-            logging.info(f"Transcription result: {text}")
-            if info:
-                 logging.info(f"Detected language: {info.language} with probability {info.language_probability}")
+            if not text:
+                logging.warning("Transcription resulted in empty text")
+                if max_amp < 0.001:
+                    logging.warning("Audio level was extremely low, possibly wrong input device or muted mic")
+            else:
+                logging.info(f"Transcription result: {text}")
+                if info:
+                     logging.info(f"Detected language: {info.language} with probability {info.language_probability}")
             
             return text
 
