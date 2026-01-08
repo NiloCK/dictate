@@ -101,6 +101,10 @@ chmod +x /usr/local/bin/config_manager.py
 chmod +x /usr/local/bin/dictation_client.py
 chmod +x /usr/local/bin/dictation
 
+# Create symlinks for legacy/alternative command names
+ln -sf /usr/local/bin/dictation /usr/local/bin/dictate
+ln -sf /usr/local/bin/dictation /usr/local/bin/dictation.sh
+
 # Set proper permissions for icons
 chmod 644 /usr/local/bin/red-circle.png
 chmod 644 /usr/local/bin/grey-circle.png
@@ -188,6 +192,8 @@ PartOf=graphical-session.target
 Type=simple
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_tray_daemon.py
 Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u $ACTUAL_USER)/bus
 Restart=on-failure
 RestartSec=3
 WorkingDirectory=/usr/local/bin

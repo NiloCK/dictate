@@ -126,6 +126,15 @@ class TrayService:
         self.get_audio_devices()
         self.refresh_menu()
 
+    def toggle_recording(self):
+        """Toggle recording via the daemon"""
+        logging.info("Toggling recording via tray")
+        try:
+            # Running 'dictation' without arguments toggles recording
+            subprocess.run(['/usr/local/bin/dictation'], capture_output=True)
+        except Exception as e:
+            logging.error(f"Error toggling recording: {e}")
+
     def get_audio_devices(self):
         """Get list of audio devices from the daemon with fallback"""
         logging.info("Beginning audio device retrieval")
@@ -274,23 +283,10 @@ class TrayService:
         )
 
         # Create dynamic submenu for audio devices
-        devices = []
-        max_retries = 4
-        retry_delay = 2
-
-        for attempt in range(max_retries):
-            logging.info(f"Attempt {attempt+1}/{max_retries} to get audio devices")
-            devices = self.get_audio_devices()
-            if devices:
-                logging.info(f"Successfully got {len(devices)} audio devices on attempt {attempt+1}")
-                break
-            else:
-                logging.warning(f"No devices found on attempt {attempt+1}")
-                if attempt < max_retries - 1:
-                    logging.info(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                else:
-                    logging.error("All attempts to get audio devices failed")
+        # We only try once here to avoid blocking the UI thread during a click
+        devices = self.get_audio_devices()
+        if not devices:
+            logging.warning("No devices found during menu creation")
 
         device_items = []
         current_device_id = config.get('audio_device')
@@ -314,6 +310,7 @@ class TrayService:
         device_menu = pystray.Menu(*device_items)
 
         return pystray.Menu(
+            pystray.MenuItem("Toggle Recording", lambda: self.toggle_recording()),
             pystray.MenuItem("Configuration", self.show_config_window),
             pystray.MenuItem("Discard Recording", lambda: self.discard_recording()),
             pystray.MenuItem("Model", model_menu),
@@ -375,6 +372,8 @@ class TrayService:
                     try:
                         self.icon.icon = image
                         self.icon.title = tooltip  # Update tooltip as well
+                        # On Wayland, forcing a menu refresh often nudges the shell to redraw the icon
+                        self.icon.menu = self.create_menu()
                     except Exception as e:
                         logging.error(f"Error updating icon: {e}")
                         self.recreate_icon(image_path, tooltip)
@@ -479,7 +478,9 @@ class TrayService:
 
     def type_text_robust(self, text):
         """Type text using pynput if available, else fallback to ydotool with unicode support"""
-        if self.keyboard:
+        is_wayland = os.environ.get('XDG_SESSION_TYPE') == 'wayland'
+        
+        if self.keyboard and not is_wayland:
             try:
                 logging.info("Typing with pynput")
                 self.keyboard.type(text)
@@ -488,8 +489,8 @@ class TrayService:
             except Exception as e:
                 logging.error(f"Pynput failed: {e}")
         
-        # Fallback to ydotool
-        logging.info("Falling back to ydotool")
+        # Force ydotool on Wayland or if pynput failed
+        logging.info("Using ydotool for typing")
         try:
             # Helper to type a chunk of text (ASCII only)
             def type_chunk(chunk):

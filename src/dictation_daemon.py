@@ -20,13 +20,20 @@ from pathlib import Path
 from config_manager import ConfigManager
 # pynput removed - logic moved to tray
 
+handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    log_file = '/tmp/dictation_daemon.log'
+    # Test if we can open the file for appending
+    with open(log_file, 'a'):
+        pass
+    handlers.append(logging.FileHandler(log_file))
+except (PermissionError, IOError):
+    print(f"Warning: Could not open {log_file} for writing. Logging to stdout only.", file=sys.stderr)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/tmp/dictation_daemon.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=handlers
 )
 
 SOCKET_PATH = '/tmp/dictation.sock'
@@ -207,18 +214,20 @@ class DictationSystem:
         if configured_device is not None:
             try:
                 if self.audio_handler._test_device(configured_device, 2, self.audio_handler.sample_rate):
-                    self.device_id = configured_device
-                    self.channels = 2
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 2
                 else:
                     raise RuntimeError("Configured device doesn't work")
             except Exception as e:
                 logging.warning(f"Configured device {configured_device} failed: {e}")
-                self.device_id, self.channels = self.audio_handler.get_working_device()
-                self.config.update_config(audio_device=self.device_id)
+                self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
+                self.config.update_config(audio_device=self.audio_handler.device_id)
         else:
-            self.device_id, self.channels = self.audio_handler.get_working_device()
-            self.config.update_config(audio_device=self.device_id)
+            self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
+            self.config.update_config(audio_device=self.audio_handler.device_id)
 
+        self.device_id = self.audio_handler.device_id
+        self.channels = self.audio_handler.channels
         self.sample_rate = self.audio_handler.sample_rate
         self.recording = False
         self.audio_queue = queue.Queue()
@@ -301,9 +310,15 @@ class DictationSystem:
             # Save debug WAV file at original sample rate
             try:
                 import scipy.io.wavfile as wav
-                wav.write('/tmp/last_recording.wav', self.sample_rate,
+                filename = '/tmp/last_recording.wav'
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
+                wav.write(filename, self.sample_rate,
                             (audio * 32767).astype(np.int16))
-                logging.info(f"Saved debug audio file to /tmp/last_recording.wav "
+                logging.info(f"Saved debug audio file to {filename} "
                             f"at {self.sample_rate} Hz")
             except Exception as e:
                 logging.error(f"Error saving debug audio: {e}")
