@@ -242,11 +242,12 @@ class TrayService:
 
         for device in devices:
             device_id = device['id']
+            is_device_active = device.get('is_active', False)
             device_items.append(
                 pystray.MenuItem(
                     f"{device['name']} (ID: {device_id})",
                     lambda item, id=device_id: self.set_audio_device(id),
-                    checked=lambda item, id=device_id: id == current_device_id or device.get('is_active', False)
+                    checked=lambda item, id=device_id, active=is_device_active: id == current_device_id or active
                 )
             )
 

@@ -238,6 +238,9 @@ class DictationSystem:
                 logging.info(f"Successfully configured device {configured_device}: {self.audio_handler.channels}ch, {self.audio_handler.sample_rate}Hz")
 
             except Exception as e:
+                logging.warning(f"Configured device {configured_device} failed test: {e}")
+                # Fallback to working device
+                self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
                 logging.warning(f"Configured device {configured_device} failed: {e}")
                 self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
                 self.config.update_config(audio_device=self.audio_handler.device_id)
