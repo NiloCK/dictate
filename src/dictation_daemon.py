@@ -36,8 +36,8 @@ logging.basicConfig(
     handlers=handlers
 )
 
-SOCKET_PATH = '/tmp/dictation.sock'
-TRAY_SOCKET_PATH = '/tmp/dictation_tray.sock'
+SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation.sock')
+TRAY_SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
 
 
 class AudioDeviceHandler:
@@ -213,11 +213,30 @@ class DictationSystem:
         configured_device = config_data.get('audio_device')
         if configured_device is not None:
             try:
+                # Try with 16kHz/stereo first
                 if self.audio_handler._test_device(configured_device, 2, self.audio_handler.sample_rate):
                     self.audio_handler.device_id = configured_device
                     self.audio_handler.channels = 2
+                # Try with device's native rate and stereo
+                elif self.audio_handler._test_device(configured_device, 2, int(sd.query_devices(configured_device)['default_samplerate'])):
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 2
+                    self.audio_handler.sample_rate = int(sd.query_devices(configured_device)['default_samplerate'])
+                # Try with device's native rate and mono
+                elif self.audio_handler._test_device(configured_device, 1, int(sd.query_devices(configured_device)['default_samplerate'])):
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 1
+                    self.audio_handler.sample_rate = int(sd.query_devices(configured_device)['default_samplerate'])
+                # Try with 16kHz and mono
+                elif self.audio_handler._test_device(configured_device, 1, 16000):
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 1
+                    self.audio_handler.sample_rate = 16000
                 else:
-                    raise RuntimeError("Configured device doesn't work")
+                    raise RuntimeError("Configured device doesn't work with any common format")
+                
+                logging.info(f"Successfully configured device {configured_device}: {self.audio_handler.channels}ch, {self.audio_handler.sample_rate}Hz")
+
             except Exception as e:
                 logging.warning(f"Configured device {configured_device} failed: {e}")
                 self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
@@ -456,6 +475,7 @@ class DictationSystem:
 
 
 def run_service():
+    logging.info(f"Dictation daemon starting. Socket path: {SOCKET_PATH}")
     # Remove socket if it exists
     try:
         os.unlink(SOCKET_PATH)

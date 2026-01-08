@@ -20,7 +20,7 @@ except ImportError:
 except Exception:
     PYNPUT_AVAILABLE = False
 
-SOCKET_PATH = '/tmp/dictation_tray.sock'
+SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
 
 class TrayService:
     def __init__(self):
@@ -143,15 +143,18 @@ class TrayService:
 
     def get_audio_devices(self):
         """Get list of audio devices from the daemon with fallback"""
-        daemon_socket = '/tmp/dictation.sock'
+        daemon_socket = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation.sock')
+        logging.info(f"Will attempt to connect to daemon at {daemon_socket}")
         
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.settimeout(2.0)
+                client.settimeout(3.0) # Increased timeout
                 client.connect(daemon_socket)
                 client.send('LIST_DEVICES'.encode('utf-8'))
-                response = client.recv(4096).decode('utf-8')
+                response = client.recv(16384).decode('utf-8') # Increased buffer
 
+                logging.info(f"Device list response length: {len(response)}")
+                
                 devices = []
                 for line in response.splitlines():
                     if line.strip() and "ID " in line and ":" in line:
@@ -168,6 +171,8 @@ class TrayService:
                             })
                         except ValueError:
                             continue
+                
+                logging.info(f"Parsed {len(devices)} devices")
                 return devices
 
         except Exception as e:
@@ -320,13 +325,16 @@ class TrayService:
 
             # Helper to type unicode via Linux hex entry
             def type_unicode(char):
-                hex_code = f"{ord(char):x}"
-                # Ctrl+Shift+u
-                subprocess.run(['ydotool', 'key', '29:1', '42:1', '22:1', '22:0', '42:0', '29:0'], check=True)
-                # Hex code
-                subprocess.run(['ydotool', 'type', '--key-delay', '2', hex_code], check=True)
-                # Enter
-                subprocess.run(['ydotool', 'key', '28:1', '28:0'], check=True)
+                try:
+                    hex_code = f"{ord(char):x}"
+                    # Ctrl+Shift+u
+                    subprocess.run(['ydotool', 'key', '29:1', '42:1', '22:1', '22:0', '42:0', '29:0'], check=True)
+                    # Hex code
+                    subprocess.run(['ydotool', 'type', '--key-delay', '2', hex_code], check=True)
+                    # Enter
+                    subprocess.run(['ydotool', 'key', '28:1', '28:0'], check=True)
+                except Exception as e:
+                    logging.error(f"Error typing unicode char '{char}': {e}")
 
             current_chunk = ""
             for char in text:
@@ -345,6 +353,7 @@ class TrayService:
 
     def run_socket_server(self):
         """Background thread for handling socket commands"""
+        logging.info(f"Tray daemon starting socket server at: {SOCKET_PATH}")
         try:
             if os.path.exists(SOCKET_PATH):
                 os.unlink(SOCKET_PATH)
