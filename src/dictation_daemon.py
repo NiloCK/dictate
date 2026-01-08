@@ -20,17 +20,24 @@ from pathlib import Path
 from config_manager import ConfigManager
 # pynput removed - logic moved to tray
 
+handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    log_file = '/tmp/dictation_daemon.log'
+    # Test if we can open the file for appending
+    with open(log_file, 'a'):
+        pass
+    handlers.append(logging.FileHandler(log_file))
+except (PermissionError, IOError):
+    print(f"Warning: Could not open {log_file} for writing. Logging to stdout only.", file=sys.stderr)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/tmp/dictation_daemon.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=handlers
 )
 
-SOCKET_PATH = '/tmp/dictation.sock'
-TRAY_SOCKET_PATH = '/tmp/dictation_tray.sock'
+SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation.sock')
+TRAY_SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
 
 
 class AudioDeviceHandler:
@@ -206,19 +213,43 @@ class DictationSystem:
         configured_device = config_data.get('audio_device')
         if configured_device is not None:
             try:
+                # Try with 16kHz/stereo first
                 if self.audio_handler._test_device(configured_device, 2, self.audio_handler.sample_rate):
-                    self.device_id = configured_device
-                    self.channels = 2
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 2
+                # Try with device's native rate and stereo
+                elif self.audio_handler._test_device(configured_device, 2, int(sd.query_devices(configured_device)['default_samplerate'])):
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 2
+                    self.audio_handler.sample_rate = int(sd.query_devices(configured_device)['default_samplerate'])
+                # Try with device's native rate and mono
+                elif self.audio_handler._test_device(configured_device, 1, int(sd.query_devices(configured_device)['default_samplerate'])):
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 1
+                    self.audio_handler.sample_rate = int(sd.query_devices(configured_device)['default_samplerate'])
+                # Try with 16kHz and mono
+                elif self.audio_handler._test_device(configured_device, 1, 16000):
+                    self.audio_handler.device_id = configured_device
+                    self.audio_handler.channels = 1
+                    self.audio_handler.sample_rate = 16000
                 else:
-                    raise RuntimeError("Configured device doesn't work")
-            except Exception as e:
-                logging.warning(f"Configured device {configured_device} failed: {e}")
-                self.device_id, self.channels = self.audio_handler.get_working_device()
-                self.config.update_config(audio_device=self.device_id)
-        else:
-            self.device_id, self.channels = self.audio_handler.get_working_device()
-            self.config.update_config(audio_device=self.device_id)
+                    raise RuntimeError("Configured device doesn't work with any common format")
+                
+                logging.info(f"Successfully configured device {configured_device}: {self.audio_handler.channels}ch, {self.audio_handler.sample_rate}Hz")
 
+            except Exception as e:
+                logging.warning(f"Configured device {configured_device} failed test: {e}")
+                # Fallback to working device
+                self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
+                logging.warning(f"Configured device {configured_device} failed: {e}")
+                self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
+                self.config.update_config(audio_device=self.audio_handler.device_id)
+        else:
+            self.audio_handler.device_id, self.audio_handler.channels = self.audio_handler.get_working_device()
+            self.config.update_config(audio_device=self.audio_handler.device_id)
+
+        self.device_id = self.audio_handler.device_id
+        self.channels = self.audio_handler.channels
         self.sample_rate = self.audio_handler.sample_rate
         self.recording = False
         self.audio_queue = queue.Queue()
@@ -301,9 +332,15 @@ class DictationSystem:
             # Save debug WAV file at original sample rate
             try:
                 import scipy.io.wavfile as wav
-                wav.write('/tmp/last_recording.wav', self.sample_rate,
+                filename = '/tmp/last_recording.wav'
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
+                wav.write(filename, self.sample_rate,
                             (audio * 32767).astype(np.int16))
-                logging.info(f"Saved debug audio file to /tmp/last_recording.wav "
+                logging.info(f"Saved debug audio file to {filename} "
                             f"at {self.sample_rate} Hz")
             except Exception as e:
                 logging.error(f"Error saving debug audio: {e}")
@@ -329,7 +366,7 @@ class DictationSystem:
 
             # Use Whisper to transcribe
             # faster-whisper returns a tuple (segments, info)
-            segments, info = self.model.transcribe(
+            segments_gen, info = self.model.transcribe(
                 audio, 
                 language=language, 
                 task=task,
@@ -337,12 +374,21 @@ class DictationSystem:
             )
             
             # Combine segments into a single string
-            text_segments = [segment.text for segment in segments]
+            text_segments = []
+            for segment in segments_gen:
+                logging.debug(f"Segment: {segment.text}")
+                text_segments.append(segment.text)
+            
             text = " ".join(text_segments).strip()
             
-            logging.info(f"Transcription result: {text}")
-            if info:
-                 logging.info(f"Detected language: {info.language} with probability {info.language_probability}")
+            if not text:
+                logging.warning("Transcription resulted in empty text")
+                if max_amp < 0.001:
+                    logging.warning("Audio level was extremely low, possibly wrong input device or muted mic")
+            else:
+                logging.info(f"Transcription result: {text}")
+                if info:
+                     logging.info(f"Detected language: {info.language} with probability {info.language_probability}")
             
             return text
 
@@ -432,6 +478,7 @@ class DictationSystem:
 
 
 def run_service():
+    logging.info(f"Dictation daemon starting. Socket path: {SOCKET_PATH}")
     # Remove socket if it exists
     try:
         os.unlink(SOCKET_PATH)

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Check for root privileges
-if [ "$EUID" -ne 0 ]; then
+if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root"
     exit 1
 fi
@@ -69,12 +69,12 @@ fi
 
 # Install system dependencies
 echo "Installing system dependencies..."
-apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool ydotoold
+apt-get update && apt-get install -y portaudio19-dev libportaudio2 x11-xserver-utils dbus-x11 python3-xlib ydotool ydotoold gir1.2-ayatanaappindicator3-0.1 gir1.2-gtk-3.0 python3-gi python3-gi-cairo
 
 # Create virtual environment
 VENV_PATH="/opt/dictation_venv"
 echo "Creating Python virtual environment at $VENV_PATH..."
-python3 -m venv "$VENV_PATH"
+python3 -m venv --system-site-packages "$VENV_PATH"
 
 # Set permissions for the virtual environment
 chown -R $ACTUAL_USER:$ACTUAL_USER "$VENV_PATH"
@@ -100,6 +100,10 @@ chmod +x /usr/local/bin/dictation_tray_daemon.py
 chmod +x /usr/local/bin/config_manager.py
 chmod +x /usr/local/bin/dictation_client.py
 chmod +x /usr/local/bin/dictation
+
+# Create symlinks for legacy/alternative command names
+ln -sf /usr/local/bin/dictation /usr/local/bin/dictate
+ln -sf /usr/local/bin/dictation /usr/local/bin/dictation.sh
 
 # Set proper permissions for icons
 chmod 644 /usr/local/bin/red-circle.png
@@ -137,16 +141,32 @@ echo "Configuring ydotool..."
 # Kill any existing user instances to be clean
 killall ydotoold 2>/dev/null
 
-# Start system-wide ydotoold if not running via systemd
-if ! pgrep -x "ydotoold" > /dev/null; then
-    echo "Starting ydotoold in background..."
-    # Launch ydotoold as a background process
-    ydotoold &
-    # Give it a moment to create the socket
-    sleep 2
-fi
+# Create a systemd service for ydotoold
+cat > /etc/systemd/system/ydotoold.service << EOL
+[Unit]
+Description=ydotoold - backend for ydotool
+After=network.target
 
-# Set permissions on the ydotool socket so the user can write to it
+[Service]
+Type=simple
+ExecStart=/usr/bin/ydotoold
+# Ensure the socket has correct permissions after starting
+ExecStartPost=/bin/sh -c 'sleep 1 && chmod 666 /tmp/.ydotool_socket'
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+systemctl daemon-reload
+systemctl enable ydotoold
+systemctl restart ydotoold
+
+# Give it a moment to create the socket
+sleep 2
+
+# Set permissions on the ydotool socket again just in case
 if [ -e "/tmp/.ydotool_socket" ]; then
     chmod 666 /tmp/.ydotool_socket
     echo "ydotool socket permissions set."
@@ -155,39 +175,50 @@ else
 fi
 
 # Install systemd services
-cat > /etc/systemd/system/dictation.service << EOL
+# NOTE: We run the main daemon as a USER service so it can access PulseAudio/PipeWire
+# We must clean up any root-owned artifacts from previous installs to prevent permission errors
+echo "Cleaning up root-owned socket and logs..."
+rm -f /tmp/dictation.sock
+rm -f /tmp/dictation_daemon.log
+rm -f /tmp/dictation_tray.sock
+rm -f /tmp/last_recording.wav
+
+echo "Setting up user-level systemd services..."
+mkdir -p /home/$ACTUAL_USER/.config/systemd/user/
+
+# Main Dictation Daemon (User Service)
+cat > /home/$ACTUAL_USER/.config/systemd/user/dictation.service << EOL
 [Unit]
 Description=Dictation Service
-After=network.target
+After=network.target sound.target
 
 [Service]
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_daemon.py
-Environment=HOME=/root
+Environment=HOME=/home/$ACTUAL_USER
 Environment=XDG_CACHE_HOME=/var/cache/whisper
 Environment=XDG_CONFIG_HOME=/home/$ACTUAL_USER/.config
-User=root
-Group=root
 Restart=always
 RestartSec=3
 WorkingDirectory=/usr/local/bin
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 EOL
 
-# Set up user-level systemd service for the tray
-echo "Setting up user-level systemd service for tray icon..."
-mkdir -p /home/$ACTUAL_USER/.config/systemd/user/
+# Tray Daemon (User Service)
 cat > /home/$ACTUAL_USER/.config/systemd/user/dictation_tray.service << EOL
 [Unit]
 Description=Dictation Tray Service
-After=graphical-session.target
+After=graphical-session.target dictation.service
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_tray_daemon.py
 Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_SESSION_TYPE=wayland
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u $ACTUAL_USER)/bus
 Restart=on-failure
 RestartSec=3
 WorkingDirectory=/usr/local/bin
@@ -198,27 +229,31 @@ EOL
 
 chown -R $ACTUAL_USER:$ACTUAL_USER /home/$ACTUAL_USER/.config/systemd/
 
-# Set permissions for service files
-chmod 644 /etc/systemd/system/dictation.service
+# Remove legacy root service if it exists
+if [ -f "/etc/systemd/system/dictation.service" ]; then
+    echo "Removing legacy root service..."
+    systemctl stop dictation 2>/dev/null
+    systemctl disable dictation 2>/dev/null
+    rm -f /etc/systemd/system/dictation.service
+    systemctl daemon-reload
+fi
 
-# Register and run the services
-echo "Enabling and starting dictation services..."
-systemctl daemon-reload
-systemctl enable dictation
-systemctl start dictation
-
+# Register and run the USER services
+echo "Enabling and starting dictation services (User)..."
 loginctl enable-linger $ACTUAL_USER
 sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user daemon-reload
-sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user enable dictation_tray.service
-sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user start dictation_tray.service
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user enable dictation
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user restart dictation
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user enable dictation_tray
+sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user restart dictation_tray
 
 # Check if services started successfully
 echo "Verifying services..."
-if systemctl is-active --quiet dictation; then
+if sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user is-active --quiet dictation; then
     echo "✓ Dictation service started successfully"
 else
     echo "✗ Dictation service failed to start"
-    echo "Check logs with: journalctl -u dictation"
+    echo "Check logs with: sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) journalctl --user -u dictation"
 fi
 
 if sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user is-active --quiet dictation_tray; then
@@ -230,7 +265,7 @@ fi
 
 echo "Installation complete."
 
-if ! systemctl is-active --quiet dictation ||
+if ! sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user is-active --quiet dictation ||
    ! sudo -u $ACTUAL_USER XDG_RUNTIME_DIR=/run/user/$(id -u $ACTUAL_USER) systemctl --user is-active --quiet dictation_tray; then
     echo "Some services failed to start. Review the errors above and check logs for more details."
 fi

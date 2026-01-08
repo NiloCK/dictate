@@ -7,8 +7,10 @@ import logging
 import argparse
 from config_manager import ConfigManager
 
-DAEMON_SOCKET = '/tmp/dictation.sock'
-TRAY_SOCKET = '/tmp/dictation_tray.sock'
+import os
+
+DAEMON_SOCKET = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation.sock')
+TRAY_SOCKET = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
 
 
 def send_tray_command(command):
