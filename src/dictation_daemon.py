@@ -52,7 +52,7 @@ class AudioDeviceHandler:
         input_devices = []
 
         for i, device in enumerate(devices):
-            if device['max_input_channels'] > 0:
+            if device['max_input_channels'] > 0 and not self.is_excluded_device(device):
                 input_devices.append({
                     'id': i,
                     'name': device['name'],
@@ -81,6 +81,13 @@ class AudioDeviceHandler:
             'upmix', 'vdownmix', 'null', 'dummy', 'loop'
         ]
         return not any(x in name for x in virtual_indicators)
+
+    def is_excluded_device(self, device_info):
+        """Check if this device should be explicitly ignored"""
+        name = device_info['name'].lower()
+        # Hardcoded exclusion for devices that cause issues
+        excluded_indicators = ['plugable']
+        return any(x in name for x in excluded_indicators)
 
     def _test_device(self, device_id, channels, sample_rate):
         """Test if a device configuration works and actually receives audio"""
@@ -135,7 +142,7 @@ class AudioDeviceHandler:
         devices = self.list_devices()
 
         # First try hardware devices
-        hardware_devices = [d for d in devices if self.is_hardware_device(d)]
+        hardware_devices = [d for d in devices if self.is_hardware_device(d) and not self.is_excluded_device(d)]
         self.logger.info(f"Found {len(hardware_devices)} hardware devices")
 
         # Try hardware devices first
@@ -163,6 +170,8 @@ class AudioDeviceHandler:
         # If no hardware devices work, try virtual devices as fallback
         self.logger.warning("No hardware devices working, trying virtual devices")
         for device in devices:
+            if self.is_excluded_device(device):
+                continue
             device_id = device['id']
             if self._test_device(device_id, 1, self.sample_rate):
                 self.device_id = device_id
@@ -213,6 +222,16 @@ class DictationSystem:
         configured_device = config_data.get('audio_device')
         if configured_device is not None:
             try:
+                # Check if device is excluded
+                try:
+                    device_info = sd.query_devices(configured_device)
+                    if self.audio_handler.is_excluded_device(device_info):
+                        raise RuntimeError(f"Configured device {configured_device} ({device_info['name']}) is excluded")
+                except Exception as e:
+                    if "excluded" in str(e):
+                        raise
+                    logging.warning(f"Could not query device info for {configured_device}: {e}")
+
                 # Try with 16kHz/stereo first
                 if self.audio_handler._test_device(configured_device, 2, self.audio_handler.sample_rate):
                     self.audio_handler.device_id = configured_device
