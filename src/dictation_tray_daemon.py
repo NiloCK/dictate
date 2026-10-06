@@ -195,10 +195,11 @@ class TrayService:
             config = {'model': 'base'}
 
         # Model Menu
+        # Sizes based on Hugging Face faster-whisper/Systran model repositories (CTranslate2 converted weights)
         model_menu = pystray.Menu(
-            pystray.MenuItem("OpenAI Tiny (Fastest, ~150MB)", lambda: self.set_model("tiny"),
+            pystray.MenuItem("OpenAI Tiny (Fastest, ~75MB)", lambda: self.set_model("tiny"),
                            checked=lambda item: config.get('model') == "tiny"),
-            pystray.MenuItem("OpenAI Base (Default, ~200MB)", lambda: self.set_model("base"),
+            pystray.MenuItem("OpenAI Base (Default, ~150MB)", lambda: self.set_model("base"),
                            checked=lambda item: config.get('model') == "base"),
             pystray.MenuItem("OpenAI Small (Balanced, ~500MB)", lambda: self.set_model("small"),
                            checked=lambda item: config.get('model') == "small"),
