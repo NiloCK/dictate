@@ -4,6 +4,7 @@
 import sys
 import subprocess
 from faster_whisper import WhisperModel
+from huggingface_hub.utils import LocalEntryNotFoundError
 import sounddevice as sd
 import numpy as np
 import threading
@@ -14,6 +15,7 @@ import socket
 import threading
 import logging
 import signal
+import ctypes
 import sys
 import json
 from pathlib import Path
@@ -182,23 +184,94 @@ class AudioDeviceHandler:
         raise RuntimeError("No working audio input device found")
 
 
+# Exit code for unrecoverable startup errors (e.g. model can't be loaded).
+# dictation.service lists it in RestartPreventExitStatus so systemd stays down
+# instead of restart-looping.
+EXIT_FATAL = 3
+
+MODEL_DOWNLOAD_TIMEOUT = int(os.environ.get('DICTATION_MODEL_DOWNLOAD_TIMEOUT', 900))
+
+
+class ModelLoadError(Exception):
+    pass
+
+
+def _model_download_timed_out(signum, frame):
+    raise TimeoutError(f"model download did not finish within {MODEL_DOWNLOAD_TIMEOUT}s")
+
+
 def download_model(model_name):
-    """Download/Load the model using faster-whisper"""
+    """Load the model from the local cache, downloading it only if it isn't cached"""
     logging.info(f"Loading faster-whisper model: {model_name}")
-    # faster-whisper stores models in a specific cache, usually ~/.cache/huggingface/hub
-    # We can rely on its default caching or specify download_root.
-    # The original code used /var/cache/whisper. faster-whisper doesn't use the same format.
-    # We will let faster-whisper manage its own cache for now, or use the standard HF cache.
-    
+    # device="auto" checks for CUDA/ROCM, else CPU
+    # compute_type="int8" is efficient for CPU and supported on GPU
     try:
-        # device="auto" checks for CUDA/ROCM, else CPU
-        # compute_type="int8" is efficient for CPU and supported on GPU
-        model = WhisperModel(model_name, device="auto", compute_type="int8")
-        logging.info("Model loaded successfully!")
+        model = WhisperModel(model_name, device="auto", compute_type="int8", local_files_only=True)
+        logging.info("Model loaded from local cache")
         return model
+    except LocalEntryNotFoundError:
+        logging.info(f"Model {model_name} not in local cache, downloading (timeout {MODEL_DOWNLOAD_TIMEOUT}s)")
+
+    # Network calls inside huggingface_hub can block indefinitely; bound the whole
+    # download with SIGALRM. Only usable from the main thread, which is where
+    # startup and RELOAD_CONFIG both run.
+    previous_handler = signal.signal(signal.SIGALRM, _model_download_timed_out)
+    signal.alarm(MODEL_DOWNLOAD_TIMEOUT)
+    try:
+        model = WhisperModel(model_name, device="auto", compute_type="int8")
+    except PermissionError as e:
+        raise ModelLoadError(
+            f"Cannot write model '{model_name}' to the cache: {e}. "
+            f"The cache under {os.environ.get('XDG_CACHE_HOME', '~/.cache')} must be owned by "
+            f"the user running this service (re-run installation.sh, or chown -R it)."
+        ) from e
     except Exception as e:
-        logging.error(f"Error loading model: {e}", exc_info=True)
-        raise
+        raise ModelLoadError(f"Could not download model '{model_name}': {e}") from e
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    logging.info("Model downloaded and loaded successfully!")
+    return model
+
+
+MADV_WILLNEED = 3
+_libc = ctypes.CDLL(None, use_errno=True)
+_libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+
+
+def swapped_mb():
+    """MB of this process's memory currently in swap"""
+    with open('/proc/self/status') as f:
+        for line in f:
+            if line.startswith('VmSwap:'):
+                return int(line.split()[1]) // 1024
+    return 0
+
+
+def prefetch_swapped_memory():
+    """Ask the kernel to read swapped-out anonymous memory (i.e. the model weights) back in.
+
+    Called when recording starts so the swap-in overlaps with the user speaking,
+    instead of stalling the transcription afterwards. No-op when nothing is swapped.
+    """
+    before = swapped_mb()
+    if before == 0:
+        return
+    start = time.time()
+    with open('/proc/self/maps') as f:
+        for line in f:
+            fields = line.split()
+            perms = fields[1]
+            path = fields[5] if len(fields) > 5 else ''
+            # Anonymous private memory only: that's what lives in swap. File-backed
+            # pages are re-read from their file, and special regions reject madvise.
+            if 'p' not in perms or 'r' not in perms or (path and path != '[heap]'):
+                continue
+            lo, hi = (int(x, 16) for x in fields[0].split('-'))
+            _libc.madvise(lo, hi - lo, MADV_WILLNEED)
+    # Readahead completes asynchronously and VmSwap only drops once pages are touched,
+    # so there's no useful "after" figure to report here.
+    logging.info(f"Prefetch: requested swap-in of {before}MB ({time.time() - start:.2f}s)")
 
 
 class DictationSystem:
@@ -277,6 +350,7 @@ class DictationSystem:
     def handle_toggle(self):
         logging.info("Received TOGGLE command")
         if not self.recording:
+            threading.Thread(target=prefetch_swapped_memory, daemon=True).start()
             self.recording_thread = threading.Thread(target=self.start_recording)
             self.recording_thread.start()
             return "RECORDING_STARTED"
@@ -510,7 +584,12 @@ def run_service():
     os.chmod(SOCKET_PATH, 0o666)  # Allow all users to send commands
     server.listen(1)
 
-    dictation = DictationSystem()
+    try:
+        dictation = DictationSystem()
+    except ModelLoadError as e:
+        logging.critical(f"{e} -- exiting; fix the problem and run: systemctl --user restart dictation")
+        # os._exit: a hung download thread would otherwise block interpreter shutdown
+        os._exit(EXIT_FATAL)
 
     print("Dictation service started, waiting for commands...")
 

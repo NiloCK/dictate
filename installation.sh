@@ -131,7 +131,8 @@ fi
 # Set up working dir for models
 mkdir -p /var/cache/whisper
 chmod 755 /var/cache/whisper
-chown $ACTUAL_USER:$ACTUAL_USER /var/cache/whisper
+# -R: older installs ran the daemon as root and left root-owned models here
+chown -R $ACTUAL_USER:$ACTUAL_USER /var/cache/whisper
 
 # Make sure the socket directory is accessible
 chmod 1777 /tmp
@@ -191,6 +192,8 @@ cat > /home/$ACTUAL_USER/.config/systemd/user/dictation.service << EOL
 [Unit]
 Description=Dictation Service
 After=network.target sound.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 ExecStart=$VENV_PATH/bin/python /usr/local/bin/dictation_daemon.py
@@ -199,6 +202,8 @@ Environment=XDG_CACHE_HOME=/var/cache/whisper
 Environment=XDG_CONFIG_HOME=/home/$ACTUAL_USER/.config
 Restart=always
 RestartSec=3
+# EXIT_FATAL in dictation_daemon.py: unrecoverable (e.g. model won't load), don't loop
+RestartPreventExitStatus=3
 WorkingDirectory=/usr/local/bin
 
 [Install]
