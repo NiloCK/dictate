@@ -11,6 +11,7 @@ import logging
 import time
 from config_manager import ConfigManager
 import subprocess
+import shutil
 
 try:
     from pynput.keyboard import Controller
@@ -21,6 +22,7 @@ except Exception:
     PYNPUT_AVAILABLE = False
 
 SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
+LAST_RECORDING_PATH = '/tmp/last_recording.wav'  # written by dictation_daemon.py
 
 class TrayService:
     def __init__(self):
@@ -117,6 +119,17 @@ class TrayService:
             subprocess.run(['/usr/local/bin/dictation', 'discard'], capture_output=True)
         except Exception as e:
             logging.error(f"Error discarding recording: {e}")
+
+    def play_last_recording(self):
+        """Play back the audio the model last transcribed"""
+        player = next((p for p in ('pw-play', 'paplay', 'aplay') if shutil.which(p)), None)
+        if player is None:
+            logging.error("No audio player found (tried pw-play, paplay, aplay)")
+            return
+        try:
+            subprocess.Popen([player, LAST_RECORDING_PATH])
+        except Exception as e:
+            logging.error(f"Error playing last recording: {e}")
 
     def restart_daemon(self):
         """Restart the dictation daemon"""
@@ -258,6 +271,11 @@ class TrayService:
 
         device_menu = pystray.Menu(*device_items)
 
+        debug_menu = pystray.Menu(
+            pystray.MenuItem("Play Last Recording", lambda: self.play_last_recording(),
+                           enabled=lambda item: os.path.exists(LAST_RECORDING_PATH))
+        )
+
         return pystray.Menu(
             pystray.MenuItem("Toggle Recording", lambda: self.toggle_recording()),
             pystray.MenuItem("Configuration", self.show_config_window),
@@ -267,6 +285,7 @@ class TrayService:
             pystray.MenuItem("Task", task_menu),
             pystray.MenuItem("Audio Devices", device_menu),
             pystray.MenuItem("Refresh Devices", lambda: self.refresh_menu()),
+            pystray.MenuItem("Debug", debug_menu),
             pystray.MenuItem("Restart Daemon", lambda: self.restart_daemon()),
             pystray.MenuItem("Quit", self.quit_application)
         )

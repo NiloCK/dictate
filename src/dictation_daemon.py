@@ -40,6 +40,7 @@ logging.basicConfig(
 
 SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation.sock')
 TRAY_SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
+LAST_RECORDING_PATH = '/tmp/last_recording.wav'  # also read by dictation_tray_daemon.py
 
 
 class AudioDeviceHandler:
@@ -422,22 +423,6 @@ class DictationSystem:
             logging.info(f"Processing audio: length={len(audio)}, "
                         f"max={np.max(audio)}, min={np.min(audio)}")
 
-            # Save debug WAV file at original sample rate
-            try:
-                import scipy.io.wavfile as wav
-                filename = '/tmp/last_recording.wav'
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except Exception:
-                    pass
-                wav.write(filename, self.sample_rate,
-                            (audio * 32767).astype(np.int16))
-                logging.info(f"Saved debug audio file to {filename} "
-                            f"at {self.sample_rate} Hz")
-            except Exception as e:
-                logging.error(f"Error saving debug audio: {e}")
-
             # Resample for Whisper if needed
             if self.sample_rate != 16000:
                 logging.info(f"Resampling audio from {self.sample_rate} Hz to 16000 Hz")
@@ -445,6 +430,14 @@ class DictationSystem:
                 audio = signal.resample(audio,
                                         int(len(audio) * 16000 / self.sample_rate))
                 logging.info(f"Resampled audio shape: {audio.shape}")
+
+            # Save exactly what the model receives, for "play last recording" in the tray
+            try:
+                import scipy.io.wavfile as wav
+                wav.write(LAST_RECORDING_PATH, 16000, (np.clip(audio, -1, 1) * 32767).astype(np.int16))
+                logging.info(f"Saved debug audio file to {LAST_RECORDING_PATH}")
+            except Exception as e:
+                logging.error(f"Error saving debug audio: {e}")
 
             # Get language and task from config
             config_data = self.config.load_config()
