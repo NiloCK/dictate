@@ -4,6 +4,7 @@
 import sys
 import subprocess
 from faster_whisper import WhisperModel
+from huggingface_hub.utils import LocalEntryNotFoundError
 import sounddevice as sd
 import numpy as np
 import threading
@@ -14,6 +15,7 @@ import socket
 import threading
 import logging
 import signal
+import ctypes
 import sys
 import json
 from pathlib import Path
@@ -38,6 +40,7 @@ logging.basicConfig(
 
 SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation.sock')
 TRAY_SOCKET_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', '/tmp'), 'dictation_tray.sock')
+LAST_RECORDING_PATH = '/tmp/last_recording.wav'  # also read by dictation_tray_daemon.py
 
 
 class AudioDeviceHandler:
@@ -52,7 +55,7 @@ class AudioDeviceHandler:
         input_devices = []
 
         for i, device in enumerate(devices):
-            if device['max_input_channels'] > 0:
+            if device['max_input_channels'] > 0 and not self.is_excluded_device(device):
                 input_devices.append({
                     'id': i,
                     'name': device['name'],
@@ -81,6 +84,13 @@ class AudioDeviceHandler:
             'upmix', 'vdownmix', 'null', 'dummy', 'loop'
         ]
         return not any(x in name for x in virtual_indicators)
+
+    def is_excluded_device(self, device_info):
+        """Check if this device should be explicitly ignored"""
+        name = device_info['name'].lower()
+        # Hardcoded exclusion for devices that cause issues
+        excluded_indicators = ['plugable']
+        return any(x in name for x in excluded_indicators)
 
     def _test_device(self, device_id, channels, sample_rate):
         """Test if a device configuration works and actually receives audio"""
@@ -135,7 +145,7 @@ class AudioDeviceHandler:
         devices = self.list_devices()
 
         # First try hardware devices
-        hardware_devices = [d for d in devices if self.is_hardware_device(d)]
+        hardware_devices = [d for d in devices if self.is_hardware_device(d) and not self.is_excluded_device(d)]
         self.logger.info(f"Found {len(hardware_devices)} hardware devices")
 
         # Try hardware devices first
@@ -163,6 +173,8 @@ class AudioDeviceHandler:
         # If no hardware devices work, try virtual devices as fallback
         self.logger.warning("No hardware devices working, trying virtual devices")
         for device in devices:
+            if self.is_excluded_device(device):
+                continue
             device_id = device['id']
             if self._test_device(device_id, 1, self.sample_rate):
                 self.device_id = device_id
@@ -173,23 +185,94 @@ class AudioDeviceHandler:
         raise RuntimeError("No working audio input device found")
 
 
+# Exit code for unrecoverable startup errors (e.g. model can't be loaded).
+# dictation.service lists it in RestartPreventExitStatus so systemd stays down
+# instead of restart-looping.
+EXIT_FATAL = 3
+
+MODEL_DOWNLOAD_TIMEOUT = int(os.environ.get('DICTATION_MODEL_DOWNLOAD_TIMEOUT', 900))
+
+
+class ModelLoadError(Exception):
+    pass
+
+
+def _model_download_timed_out(signum, frame):
+    raise TimeoutError(f"model download did not finish within {MODEL_DOWNLOAD_TIMEOUT}s")
+
+
 def download_model(model_name):
-    """Download/Load the model using faster-whisper"""
+    """Load the model from the local cache, downloading it only if it isn't cached"""
     logging.info(f"Loading faster-whisper model: {model_name}")
-    # faster-whisper stores models in a specific cache, usually ~/.cache/huggingface/hub
-    # We can rely on its default caching or specify download_root.
-    # The original code used /var/cache/whisper. faster-whisper doesn't use the same format.
-    # We will let faster-whisper manage its own cache for now, or use the standard HF cache.
-    
+    # device="auto" checks for CUDA/ROCM, else CPU
+    # compute_type="int8" is efficient for CPU and supported on GPU
     try:
-        # device="auto" checks for CUDA/ROCM, else CPU
-        # compute_type="int8" is efficient for CPU and supported on GPU
-        model = WhisperModel(model_name, device="auto", compute_type="int8")
-        logging.info("Model loaded successfully!")
+        model = WhisperModel(model_name, device="auto", compute_type="int8", local_files_only=True)
+        logging.info("Model loaded from local cache")
         return model
+    except LocalEntryNotFoundError:
+        logging.info(f"Model {model_name} not in local cache, downloading (timeout {MODEL_DOWNLOAD_TIMEOUT}s)")
+
+    # Network calls inside huggingface_hub can block indefinitely; bound the whole
+    # download with SIGALRM. Only usable from the main thread, which is where
+    # startup and RELOAD_CONFIG both run.
+    previous_handler = signal.signal(signal.SIGALRM, _model_download_timed_out)
+    signal.alarm(MODEL_DOWNLOAD_TIMEOUT)
+    try:
+        model = WhisperModel(model_name, device="auto", compute_type="int8")
+    except PermissionError as e:
+        raise ModelLoadError(
+            f"Cannot write model '{model_name}' to the cache: {e}. "
+            f"The cache under {os.environ.get('XDG_CACHE_HOME', '~/.cache')} must be owned by "
+            f"the user running this service (re-run installation.sh, or chown -R it)."
+        ) from e
     except Exception as e:
-        logging.error(f"Error loading model: {e}", exc_info=True)
-        raise
+        raise ModelLoadError(f"Could not download model '{model_name}': {e}") from e
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    logging.info("Model downloaded and loaded successfully!")
+    return model
+
+
+MADV_WILLNEED = 3
+_libc = ctypes.CDLL(None, use_errno=True)
+_libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+
+
+def swapped_mb():
+    """MB of this process's memory currently in swap"""
+    with open('/proc/self/status') as f:
+        for line in f:
+            if line.startswith('VmSwap:'):
+                return int(line.split()[1]) // 1024
+    return 0
+
+
+def prefetch_swapped_memory():
+    """Ask the kernel to read swapped-out anonymous memory (i.e. the model weights) back in.
+
+    Called when recording starts so the swap-in overlaps with the user speaking,
+    instead of stalling the transcription afterwards. No-op when nothing is swapped.
+    """
+    before = swapped_mb()
+    if before == 0:
+        return
+    start = time.time()
+    with open('/proc/self/maps') as f:
+        for line in f:
+            fields = line.split()
+            perms = fields[1]
+            path = fields[5] if len(fields) > 5 else ''
+            # Anonymous private memory only: that's what lives in swap. File-backed
+            # pages are re-read from their file, and special regions reject madvise.
+            if 'p' not in perms or 'r' not in perms or (path and path != '[heap]'):
+                continue
+            lo, hi = (int(x, 16) for x in fields[0].split('-'))
+            _libc.madvise(lo, hi - lo, MADV_WILLNEED)
+    # Readahead completes asynchronously and VmSwap only drops once pages are touched,
+    # so there's no useful "after" figure to report here.
+    logging.info(f"Prefetch: requested swap-in of {before}MB ({time.time() - start:.2f}s)")
 
 
 class DictationSystem:
@@ -213,6 +296,16 @@ class DictationSystem:
         configured_device = config_data.get('audio_device')
         if configured_device is not None:
             try:
+                # Check if device is excluded
+                try:
+                    device_info = sd.query_devices(configured_device)
+                    if self.audio_handler.is_excluded_device(device_info):
+                        raise RuntimeError(f"Configured device {configured_device} ({device_info['name']}) is excluded")
+                except Exception as e:
+                    if "excluded" in str(e):
+                        raise
+                    logging.warning(f"Could not query device info for {configured_device}: {e}")
+
                 # Try with 16kHz/stereo first
                 if self.audio_handler._test_device(configured_device, 2, self.audio_handler.sample_rate):
                     self.audio_handler.device_id = configured_device
@@ -258,6 +351,7 @@ class DictationSystem:
     def handle_toggle(self):
         logging.info("Received TOGGLE command")
         if not self.recording:
+            threading.Thread(target=prefetch_swapped_memory, daemon=True).start()
             self.recording_thread = threading.Thread(target=self.start_recording)
             self.recording_thread.start()
             return "RECORDING_STARTED"
@@ -329,22 +423,6 @@ class DictationSystem:
             logging.info(f"Processing audio: length={len(audio)}, "
                         f"max={np.max(audio)}, min={np.min(audio)}")
 
-            # Save debug WAV file at original sample rate
-            try:
-                import scipy.io.wavfile as wav
-                filename = '/tmp/last_recording.wav'
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except Exception:
-                    pass
-                wav.write(filename, self.sample_rate,
-                            (audio * 32767).astype(np.int16))
-                logging.info(f"Saved debug audio file to {filename} "
-                            f"at {self.sample_rate} Hz")
-            except Exception as e:
-                logging.error(f"Error saving debug audio: {e}")
-
             # Resample for Whisper if needed
             if self.sample_rate != 16000:
                 logging.info(f"Resampling audio from {self.sample_rate} Hz to 16000 Hz")
@@ -352,6 +430,14 @@ class DictationSystem:
                 audio = signal.resample(audio,
                                         int(len(audio) * 16000 / self.sample_rate))
                 logging.info(f"Resampled audio shape: {audio.shape}")
+
+            # Save exactly what the model receives, for "play last recording" in the tray
+            try:
+                import scipy.io.wavfile as wav
+                wav.write(LAST_RECORDING_PATH, 16000, (np.clip(audio, -1, 1) * 32767).astype(np.int16))
+                logging.info(f"Saved debug audio file to {LAST_RECORDING_PATH}")
+            except Exception as e:
+                logging.error(f"Error saving debug audio: {e}")
 
             # Get language and task from config
             config_data = self.config.load_config()
@@ -491,7 +577,12 @@ def run_service():
     os.chmod(SOCKET_PATH, 0o666)  # Allow all users to send commands
     server.listen(1)
 
-    dictation = DictationSystem()
+    try:
+        dictation = DictationSystem()
+    except ModelLoadError as e:
+        logging.critical(f"{e} -- exiting; fix the problem and run: systemctl --user restart dictation")
+        # os._exit: a hung download thread would otherwise block interpreter shutdown
+        os._exit(EXIT_FATAL)
 
     print("Dictation service started, waiting for commands...")
 
